@@ -1,0 +1,18 @@
+# 统一换行处理，避免不同机器上 diff 满屏都是"整文件改动"
+* text=auto
+
+# 二进制（别做任何换行/编码转换）
+*.ico  binary
+*.png  binary
+*.exe  binary
+
+# Windows 侧更适合 CRLF 的文本
+*.bat  text eol=crlf
+*.txt  text eol=crlf
+*.iss  text eol=crlf
+
+# 源码保持 LF（避免跨平台协作时出现无意义的整文件 diff）
+*.py       text eol=lf
+*.md       text eol=lf
+*.spec     text eol=lf
+*.gitignore text eol=lf

@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 installer/
+release/
 *.spec.bak
 *.log
 
