@@ -2231,6 +2231,79 @@ check("㉓ ★★ 动过草稿、但本轮没备份 → 如实报「没还原」
       (bool(_c17["finished"]) and _c17["finished"][0][0] is False
        and _c17["finished"][0][1] == "abort" and _c17["restore"] is False), True)
 
+# ================================================================ [28]
+# ★ 第十八批（v1.1.0 导出守望，用户"继续优化"）：导出对话框出现→消失 = 该提醒还原了。
+#   铁律两条：①只观察不动手（消失≠真的导出完成，可能是取消）；②失败开放（漏提醒可以，误报不行）。
+print("[28] ★ 第十八批（导出守望）：导出窗口一关就提醒，还原仍由用户点头")
+check("㉠ export_watch 默认开（纯观察零风险）",
+      core.default_config().get("export_watch") is True,
+      core.default_config().get("export_watch"))
+check("㉡ 尺寸带存在且 min < max（白名单宁缺毋滥）",
+      (hasattr(core, "EXPORT_DLG_MIN") and hasattr(core, "EXPORT_DLG_MAX")
+       and core.EXPORT_DLG_MIN[0] < core.EXPORT_DLG_MAX[0]
+       and core.EXPORT_DLG_MIN[1] < core.EXPORT_DLG_MAX[1]), True)
+
+_ojt28 = core.jianying_toplevels
+try:
+    def _boom28():
+        raise RuntimeError("枚举炸了")
+    core.jianying_toplevels = _boom28
+    check("㉢ ★★★ 枚举窗口炸了 → find 返回 None（失败开放：漏提醒可以，误报不行）",
+          core.find_export_dialog(), None)
+
+    core.jianying_toplevels = lambda: [(1, "导出", "Dlg", 0, (100, 100, 900, 700))]
+    _h28 = core.find_export_dialog()
+    check("㉣ 标题含「导出」+ 尺寸在带内 → 命中",
+          _h28 is not None and _h28[1] == "导出", True)
+    core.jianying_toplevels = lambda: [(1, "剪映专业版", "main", 0, (0, 0, 1920, 1080))]
+    check("㉤ 主窗（标题不含关键词）→ 不命中", core.find_export_dialog(), None)
+    core.jianying_toplevels = lambda: [(1, "导出", "Dlg", 0, (100, 100, 1800, 1400))]
+    check("㉥ 超大（主窗/全屏级别）→ 不命中", core.find_export_dialog(), None)
+    core.jianying_toplevels = lambda: [(1, "导出", "Dlg", 0, (100, 100, 300, 260))]
+    check("㉦ 太小（tooltip/气泡）→ 不命中", core.find_export_dialog(), None)
+finally:
+    core.jianying_toplevels = _ojt28
+
+_ofd28 = core.find_export_dialog
+_orun28 = core._jianying_running
+try:
+    core._jianying_running = lambda: True
+    _seq28 = [None, (1, "导出", "Dlg", 0, (0, 0, 800, 600)), None]
+    core.find_export_dialog = lambda: _seq28.pop(0) if _seq28 else None
+    check("㉧ ★ 见到→消失 = \"closed\"（这就是提醒还原的信号）",
+          core.watch_export_dialog(threading.Event(), poll=0.001), "closed")
+    _s28 = threading.Event()
+    _s28.set()
+    check("㉨ stop 置位立刻收 = stopped（用户一动手就能停）",
+          core.watch_export_dialog(_s28, poll=0.001), "stopped")
+
+    def _throw28():
+        raise RuntimeError("find 炸了")
+    core.find_export_dialog = _throw28
+    check("㉩ ★★★ find 炸 → 守望按 stopped 收摊（daemon 线程绝不能带异常炸）",
+          core.watch_export_dialog(_s28, poll=0.001), "stopped")
+
+    core.find_export_dialog = lambda: None
+    core._jianying_running = lambda: False
+    check("㉪ 剪映整个退出 = no_jy 静默收摊（不算完成事件）",
+          core.watch_export_dialog(threading.Event(), poll=0.001), "no_jy")
+finally:
+    core.find_export_dialog = _ofd28
+    core._jianying_running = _orun28
+
+# ---- GUI 侧：形状 + 「只提醒不动手」红线 ----
+_gsrc28 = open("剪映伴侣.py", encoding="utf-8").read()
+check("㉫ 菜单里有「导出守望」开关", '"exportwatch"' in _gsrc28, True)
+check("㉬ 进入「等你导出」时会挂守望（_start_export_watch）",
+      "_start_export_watch()" in _gsrc28, True)
+check("㉭ 还原 / 新一轮 / 退出都收摊（_stop_export_watch 至少 3 处调用）",
+      _gsrc28.count("_stop_export_watch()") >= 3, True)
+check("㉮ _pump 会处理 export_done 消息", '"export_done"' in _gsrc28, True)
+_idx28 = _gsrc28.index('"export_done"')
+_blk28 = _gsrc28[_idx28:_idx28 + 700]
+check("㉯ ★★★ 守望只提醒、绝不自动还原（export_done 分支里不许碰 _restore_draft）",
+      "_restore_draft" not in _blk28, True)
+
 print()
 print("失败项:", fails if fails else "无")
 sys.exit(1 if fails else 0)

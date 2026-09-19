@@ -234,6 +234,14 @@ def default_config():
         "corner": "br",
         "corner_margin": 14,
         "top_gap": 92,
+        # ★★ 第十八批（2026-09-20 导出守望）：流程跑到「等你导出」之后，用户要自己在
+        #   剪映里导出，**导完还得记得回来点还原** —— 这是最后一段纯靠记忆的人工步骤。
+        #   export_watch 开着 = 伴侣在后台**只观察**剪映的导出对话框（出现 → 消失），
+        #   消失即"导出流程走完了（或被取消）"，主动把球弹出来提醒"可以一键还原了"。
+        #   ★ 只观察、不动手：绝不因为"对话框消失了"就自动去杀剪映/写草稿 ——
+        #     对话框消失也可能是用户取消了导出，自动还原等于猜。
+        #   ★ 失败开放：枚举窗口出任何异常都当"没看见"，宁可漏提醒一次。
+        "export_watch": True,
     }
 
 
@@ -1036,6 +1044,83 @@ def _close_dup_win_impl(key, keep, limit):
         close_window(h)
         closed += 1
     return closed
+
+
+# ================================================================ 导出守望（第十八批 v1.1.0）
+# ★ 管的是流程的最后一段人工：「等你导出」之后，用户去剪映里导出，导完还得
+#   **记得回来点还原**。守望 = 后台只观察导出对话框"出现 → 消失"，消失了就
+#   主动提醒"可以一键还原了"。**只观察、不动手** —— 对话框消失也可能是用户
+#   取消了导出，自动替用户还原等于猜，猜错就是把"没导成"的草稿写回去。
+EXPORT_TITLE_KW = ("导出", "Export")
+
+# 导出对话框的**可信尺寸带**（物理像素）：比 tooltip/通知气泡大，比主窗小。
+# ★ 白名单宁缺毋滥（沿用 AD_SIZES 的思路）：宁可漏检一次，也不要把主窗口 /
+#   全屏遮罩误当成导出框（误报 = 用户没导完就被喊"可以还原了"，会出真事）。
+EXPORT_DLG_MIN = (320, 200)
+EXPORT_DLG_MAX = (1400, 1100)
+
+
+def find_export_dialog():
+    """在剪映的顶层窗口里找"导出对话框"。找到返回 (hwnd, title, (l,t,r,b))，没有返回 None。
+
+    判据（三条同时满足才算）：
+      ① 顶层窗口属于剪映进程（jianyingpro.exe / capcut.exe）；
+      ② 标题含「导出」/「Export」（剪映的导出对话框标题就是「导出」）；
+      ③ 尺寸落在可信带内 —— 排掉 tooltip / 通知气泡 / 主窗 / 全屏遮罩。
+    ★ 失败开放：枚举过程出**任何异常**一律返回 None（当轮没看见）。
+      守望是"提醒"性质的功能，漏提醒一次的代价 ≈ 0，
+      误报一次（没导完就喊还原）的代价是把用户节奏全打乱 —— 所以宁可少报。
+    """
+    try:
+        for hwnd, title, cls, owner, rect in jianying_toplevels():
+            if not title:
+                continue
+            if not any(k in title for k in EXPORT_TITLE_KW):
+                continue
+            l, t, r, b = rect
+            w, h = r - l, b - t
+            if w <= 0 or h <= 0:
+                continue
+            if w < EXPORT_DLG_MIN[0] or h < EXPORT_DLG_MIN[1]:
+                continue
+            if w > EXPORT_DLG_MAX[0] or h > EXPORT_DLG_MAX[1]:
+                continue
+            return (hwnd, title, rect)
+    except Exception as _e:
+        _plog(f"导出守望：枚举窗口失败（按没看见处理）: {type(_e).__name__}: {_e}")
+        return None
+    return None
+
+
+def watch_export_dialog(stop, poll=1.0, timeout=6 * 3600):
+    """守望循环：给工作线程跑。返回
+      "closed"   —— 见到过导出对话框，然后它消失了（导出完成 / 被取消）
+      "stopped"  —— stop 事件被置位（正常收摊：开始还原 / 新一轮 / 退出）
+      "timeout"  —— 守了 timeout 秒啥也没等到
+      "no_jy"    —— 剪映整个退出了（对话框不可能再消失，静默收摊，不算事件）
+    ★ stop 必须是 threading.Event（或带 is_set() 的东西）。轮询间隔 poll 秒，
+      每一圈都先看 stop —— 用户一动手就能停，绝不拖泥带水。
+    ★ 失败开放：find_export_dialog 自己吃异常；这里再兜一层，
+      **守望线程绝不能带着异常炸出来**（它是 daemon，炸了也只是日志，但会漏提醒）。
+    """
+    try:
+        seen = False
+        deadline = time.time() + timeout
+        while not stop.is_set():
+            hit = find_export_dialog()
+            if hit:
+                seen = True
+            elif seen:
+                return "closed"
+            if not _jianying_running():
+                return "no_jy"
+            if time.time() > deadline:
+                return "timeout"
+            stop.wait(poll)
+        return "stopped"
+    except Exception as _e:
+        _plog(f"导出守望：循环异常退出（按没看见处理）: {type(_e).__name__}: {_e}")
+        return "stopped"
 
 
 # ================================================================ 极简 UIA（零依赖）

@@ -896,6 +896,76 @@ try:
         core.notify_box = _onb10
         c._await_restore = False
         c._cancel = None
+
+    # ================================================================ [11]
+    # ★ 第十八批（导出守望）：跑完进「等你导出」就挂守望；"导出窗口关了"主动提醒；
+    #   不在等待期就闭嘴；关掉开关就不挂；新一轮开始收掉旧守望。
+    print("[11] ★ 第十八批（导出守望）：导出窗口一关就提醒，还原仍由用户点头")
+    _osave11 = core.save_config
+    _onb11 = core.notify_box
+    _oth11 = gui.threading.Thread
+    core.save_config = lambda cfg: None
+    core.notify_box = lambda *a, **k: None      # done 分支会弹模态框，必须桩掉
+
+    class _NoThread11:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    gui.threading.Thread = _NoThread11
+    try:
+        # ① 跑完（Thread 被桩住 → 流程体不会真跑）→「等你导出」→ 守望自动挂上
+        c._start_pipeline()
+        c.q.put(("done", True, "正常", False))
+        c._pump()
+        check("① 「等你导出」时守望自动挂上",
+              c._await_restore and c._watch_stop is not None,
+              (c._await_restore, type(c._watch_stop).__name__))
+        check("① 守望默认开着（cfg 键已带出来）",
+              c.cfg.get("export_watch") is True, c.cfg.get("export_watch"))
+
+        # ② 守望线程报"对话框出现→消失" → 球主动提醒（不再是干等用户记忆）
+        c.q.put(("export_done",))
+        c._pump()
+        check("② ★★★ 收到 export_done → 主动提醒「检测到导出完成」",
+              c.state == ("ask", "检测到导出完成"), c.state)
+
+        # ③ 不在等待期（已还原/已中止）→ 同一条信号必须被丢掉（不骚扰）
+        c._await_restore = False
+        c.state = ("ok", "已还原")
+        c.q.put(("export_done",))
+        c._pump()
+        check("③ 不在「等你导出」→ 提醒被丢掉",
+              c.state == ("ok", "已还原"), c.state)
+
+        # ④ 菜单关掉开关 → 不再挂守望；再打开恢复
+        c._toggle_export_watch()
+        check("④ 关掉后 cfg 变 False（并已 save）",
+              c.cfg.get("export_watch") is False, c.cfg.get("export_watch"))
+        c._start_export_watch()
+        check("④ 关掉后 _start_export_watch 不挂线程", c._watch_stop is None,
+              c._watch_stop)
+        c._toggle_export_watch()
+        check("④ 再开一次恢复 True", c.cfg.get("export_watch") is True,
+              c.cfg.get("export_watch"))
+
+        # ⑤ 新一轮开始 → 旧守望立刻收摊（别让上一轮的提醒串台）
+        c._start_export_watch()
+        _w11 = c._watch_stop
+        check("⑤ 手动挂上", _w11 is not None, _w11)
+        c._start_pipeline()
+        check("⑤ ★ 新一轮开始就收掉旧守望",
+              c._watch_stop is None and _w11.is_set(),
+              (c._watch_stop, _w11.is_set()))
+    finally:
+        core.save_config = _osave11
+        core.notify_box = _onb11
+        gui.threading.Thread = _oth11
+        c._watch_stop = None
+        c._await_restore = False
+        c._cancel = None
 finally:
     try:
         if c:

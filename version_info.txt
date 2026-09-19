@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 1, 0, 0),
+    prodvers=(1, 1, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,12 +14,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'JianyingCompanion'),
         StringStruct('FileDescription', '剪映伴侣 · 预合成导出辅助（纯快捷键辅助，不修改任何视频文件）'),
-        StringStruct('FileVersion', '1.0.0.0'),
+        StringStruct('FileVersion', '1.1.0.0'),
         StringStruct('InternalName', 'JianyingCompanion'),
         StringStruct('LegalCopyright', ''),
         StringStruct('OriginalFilename', '剪映伴侣.exe'),
         StringStruct('ProductName', '剪映伴侣'),
-        StringStruct('ProductVersion', '1.0.0.0')])
+        StringStruct('ProductVersion', '1.1.0.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]

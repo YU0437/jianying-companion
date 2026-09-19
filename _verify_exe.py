@@ -237,6 +237,9 @@ def main():
             "read_shortcut_all", "_pick_clear_delete_key", "CLEAR_DEL_PREFER",
             "_wait_jy_ready_for_keys", "_jy_is_responding",
             "_clear_strip", "CLEAR_CHECK_Y", "_focus_timeline_by_click",
+            # ★ 第十八批（v1.1.0 导出守望）：检测 + 守望 + 尺寸带
+            "find_export_dialog", "watch_export_dialog",
+            "EXPORT_TITLE_KW", "EXPORT_DLG_MIN", "EXPORT_DLG_MAX",
             # 2026-09-18 第二批：自动打开原始草稿 + 三个实测坑的修复
             "open_draft_by_card", "draft_display_order", "_card_row_slots",
             "_card_at", "dismiss_jy_modals", "is_dismissable_modal",
@@ -371,6 +374,9 @@ def main():
         gnames = all_names(gco)
         # GUI 侧本批要钉住的名字（二次还原护栏 + 第十一批 UX）
         gmust = ["backup_consumed", "askyesno", "_restore_draft", "_watch",
+                 # ★ 第十八批（v1.1.0 导出守望）：挂/收/开关
+                 "_start_export_watch", "_stop_export_watch", "_toggle_export_watch",
+                 "_watch_stop",
                  # ★ 第十一批：按钮自适应宽度（长文案不再被窗口裁掉）
                  "_fit_width", "_resize_to", "ellipsize", "UI_MAX_GROW",
                  # ★ 第十一批：缩放防抖（按钮不再跟着「任务栏显/隐」翻面）
@@ -444,7 +450,10 @@ def main():
                           # ★★ 第十六批：命令行入口名（改了名字安装包就调不动了）
                           "--autosetup",
                           # ★★ 第十七批：中止菜单键 +「没在跑」时的置灰标签
-                          "abort", "中止本次流程（当前没在跑）"]
+                          "abort", "中止本次流程（当前没在跑）",
+                          # ★★ 第十八批（v1.1.0 导出守望）：菜单键 / 配置键 / 消息名
+                          "exportwatch", "export_watch", "export_done",
+                          "导出守望（导完提醒还原）"]
         txt_miss += [f"{t}(需精确常量)" for t in need_txt_exact if t not in gconsts]
         print("GUI 必需名字缺失:", gmiss if gmiss else "无")
         print("GUI 必需文案缺失:", txt_miss if txt_miss else "无")

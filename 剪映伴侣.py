@@ -483,6 +483,11 @@ class Companion:
         #   ★ 每次任务结束（`_on_done`）都清回 None：一个令牌只属于一轮任务，
         #     留着上一轮已 set 的令牌，下一轮刚启动就会"秒中止"。
         self._cancel = None
+        # ★★ 第十八批（2026-09-20 导出守望）：「等你导出」期间后台守望剪映的导出
+        #   对话框。`_watch_stop` 是收摊令牌（threading.Event，None = 没在守望）；
+        #   见到对话框"出现→消失"就把 ("export_done",) 投进队列，由 _pump 提醒用户。
+        #   ★ 只观察不动手 —— 对话框消失也可能是用户取消了导出，还原必须用户点头。
+        self._watch_stop = None
         # ★ 进度条（2026-09-18 第八批）：流水线跑起来时在按钮底部画一条，
         #   让**第一次用的人**也能看出"在干活 / 干到哪了 / 还要多久"。
         #   _pct = None 表示不在跑（不画条）；0~100 才画。
@@ -609,6 +614,7 @@ class Companion:
         _add("restorekeys", "还原剪映快捷键设置", self._restore_shortcut_keys)
         _add("autodraft", "自动打开原草稿", self._toggle_auto_draft)
         _add("autodrag", "自动拖进时间线", self._toggle_auto_drag)
+        _add("exportwatch", "导出守望（导完提醒还原）", self._toggle_export_watch)
         _add("foldertidy", "文件夹窗口规整", self._toggle_folder_tidy)
         _add("guard", "导出拦截", self._toggle_guard)
         _add("autorun", "弹窗时自动接管", self._toggle_auto_run)
@@ -1270,6 +1276,7 @@ class Companion:
           留着上一轮已 set 的令牌，下一轮刚启动就会"秒中止"。
         """
         self._await_restore = False
+        self._stop_export_watch()   # 新一轮开始 = 上一轮的守望作废
         self._cancel = threading.Event()
         self.set_state("busy", "执行中…", "全选 · 复合片段 · 预合成")
         self._sync_menu()          # 让「中止本次流程」立刻可点
@@ -1341,6 +1348,7 @@ class Companion:
             # ★ 第十七批：这段最长要等 60s，**也要能中止** —— 所以令牌在这里就挂上
             #   （和 `_start_pipeline` 同一个规矩），`_launch_then_run` 会把它透传下去。
             self._await_restore = False
+            self._stop_export_watch()   # 新一轮开始 = 上一轮的守望作废
             self._cancel = threading.Event()
             self.set_state("busy", "正在启动剪映…",
                            sub="冷启动可能要几十秒，起来后我自己接着跑", pct=4)
@@ -1490,7 +1498,62 @@ class Companion:
         self.set_state("busy", "取文件中…", "定位最新预合成产物")
         threading.Thread(target=core.extract_latest, daemon=True,
                          args=(self.cfg, self._on_status,
-                               lambda ok, msg: self._on_done(ok, msg, rescue=True))).start()
+                                lambda ok, msg: self._on_done(ok, msg, rescue=True))).start()
+
+    # ==================== 导出守望（第十八批 v1.1.0） ====================
+
+    def _start_export_watch(self):
+        """进入「等你导出」后，后台守望剪映的导出对话框。
+
+        见到"出现 → 消失"（= 导出走完了，或被用户取消）就投一条
+        ("export_done",) 进队列，由 `_pump` 把球弹出来提醒"可以一键还原了"。
+        ★ 只观察、不动手：绝不因对话框消失就自动杀剪映/写草稿。
+        ★ 守望线程是 daemon，用 stop 事件收摊；重复调用先收旧的（幂等）。
+        """
+        self._stop_export_watch()
+        if not self.cfg.get("export_watch", True):
+            return
+        stop = threading.Event()
+        self._watch_stop = stop
+
+        def _loop():
+            result = core.watch_export_dialog(stop)
+            try:
+                # 收摊令牌自己清掉（谁停的都行；新一轮开始也会先 stop 旧的）
+                if self._watch_stop is stop:
+                    self._watch_stop = None
+            except Exception:
+                pass
+            if result == "closed":
+                try:
+                    self.q.put(("export_done",))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_loop, daemon=True,
+                         name="export-watch").start()
+
+    def _stop_export_watch(self):
+        """收掉守望线程（开始还原 / 新一轮 / 退出时都要）。幂等。"""
+        stop = getattr(self, "_watch_stop", None)
+        if stop is not None:
+            stop.set()
+            self._watch_stop = None
+
+    def _toggle_export_watch(self):
+        """菜单开关：导出守望（导出完主动提醒还原）。默认开 —— 纯观察零风险。"""
+        self.cfg["export_watch"] = not self.cfg.get("export_watch", True)
+        try:
+            core.save_config(self.cfg)
+        except Exception:
+            pass
+        if self.cfg["export_watch"]:
+            self.set_state("busy", "导出守望已开",
+                           sub="导出窗口一关就提醒你还原", hold=5)
+        else:
+            self._stop_export_watch()
+            self.set_state("busy", "导出守望已关",
+                           sub="导完自己记得回来点还原", hold=5)
 
     def _restore_draft(self):
         """导出完成后：把草稿**还原回还没有预合成的那一版**。
@@ -1518,6 +1581,7 @@ class Companion:
                     parent=self.root):
                 return
         self._await_restore = False
+        self._stop_export_watch()   # ★ 开始还原 = 守望结束（别让它再报"导出完成"）
         self.set_state("busy", "还原草稿中…", "写回预合成前的草稿 · 只动元数据")
         threading.Thread(target=core.restore_draft, daemon=True,
                          args=(self.cfg, self._on_status,
@@ -1974,6 +2038,8 @@ class Companion:
                                   + ("✓" if self.cfg.get("auto_open_draft", False) else ""))
             self.menu.entryconfig(self._mi["autodrag"], label="自动拖进时间线 "
                                   + ("✓" if self.cfg.get("auto_drag_product", True) else ""))
+            self.menu.entryconfig(self._mi["exportwatch"], label="导出守望（导完提醒还原） "
+                                  + ("✓" if self.cfg.get("export_watch", True) else ""))
             self.menu.entryconfig(self._mi["foldertidy"], label="文件夹窗口规整 "
                                   + ("✓" if self.cfg.get("folder_win_tidy", True) else ""))
             self.menu.entryconfig(self._mi["embed"], label="嵌入剪映界面 "
@@ -2034,6 +2100,7 @@ class Companion:
             print(f"[menu] 刷新失败: {e}", flush=True)
 
     def _quit(self):
+        self._stop_export_watch()   # ★ 守望是 daemon，不收也会随进程走；显式停一遍干净
         try:
             if self.embedded and self.my_hwnd:
                 user32.SetParent(self.my_hwnd, None)
@@ -2228,6 +2295,16 @@ class Companion:
                 elif item[0] == "popup":
                     _, hwnd, title, is_vip = item
                     self._handle_popup(hwnd, title, is_vip)
+                elif item[0] == "export_done":
+                    # ★★ 第十八批（v1.1.0 导出守望）：剪映的导出对话框"出现→消失"了。
+                    #   消失 = 导出流程走完**或被用户取消** —— 分不清，所以只提醒、
+                    #   绝不自动动手；点不点还原由用户决定。
+                    #   ★ 只在确实还停在「等你导出」时才说话：如果用户已经自己
+                    #     还原了（_await_restore=False），这条提醒就是噪音，直接丢。
+                    if self._await_restore and self._cancel is None:
+                        self.set_state(
+                            "ask", "检测到导出完成",
+                            sub="导出窗口关了 · 左键一键还原草稿", hold=12)
                 elif item[0] == "done":
                     _, ok, msg, rescue = item
                     # ★ 第十七批：一轮任务结束（不管成功/失败/中止）就把令牌撤掉。
@@ -2257,6 +2334,10 @@ class Companion:
                             #   不用去回忆那个一闪而过的弹窗说了什么。
                             #   他在这个状态下左键点按钮 = 发还原指令（见 _click）。
                             self._await_restore = True
+                            # ★★ 第十八批：从这一刻起守望剪映的导出对话框 ——
+                            #   见到"出现→消失"就主动提醒"可以还原了"，
+                            #   把"导完还得记得回来"这段纯记忆的人工步骤消掉。
+                            self._start_export_watch()
                             self.set_state("ok", "等你导出",
                                            sub="导出完点我 → 还原草稿（回到预合成前）",
                                            hold=0)
