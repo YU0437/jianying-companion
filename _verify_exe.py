@@ -243,6 +243,8 @@ def main():
             # ★ 第十九批（v1.2.0 批量队列）
             "list_batch_candidates", "batch_prepare_draft",
             "_save_draft_via_return",
+            # ★ 第二十批（v1.3.0 全自动导出 · 实验）
+            "full_auto_export", "FULLAUTO_EXPORT_KEY_DEFAULT",
             # 2026-09-18 第二批：自动打开原始草稿 + 三个实测坑的修复
             "open_draft_by_card", "draft_display_order", "_card_row_slots",
             "_card_at", "dismiss_jy_modals", "is_dismissable_modal",
@@ -382,6 +384,9 @@ def main():
                  "_watch_stop",
                  # ★ 第十九批（v1.2.0 批量队列）：入口/开跑/工作线程
                  "_fill_batch_menu", "_start_batch", "_batch_worker", "_batch_menu",
+                 # ★ 第二十批（v1.3.0 全自动导出 · 实验）：开关/接管/收尾共用还原
+                 "_toggle_fullauto", "_run_full_auto", "_fullauto_worker",
+                 "_start_restore",
                  # ★ 第十一批：按钮自适应宽度（长文案不再被窗口裁掉）
                  "_fit_width", "_resize_to", "ellipsize", "UI_MAX_GROW",
                  # ★ 第十一批：缩放防抖（按钮不再跟着「任务栏显/隐」翻面）
@@ -460,7 +465,10 @@ def main():
                           "exportwatch", "export_watch", "export_done",
                           "导出守望（导完提醒还原）",
                           # ★★ 第十九批（v1.2.0 批量队列）：菜单键 / 收尾 rescue 名
-                          "batchmenu", "batch", "批量处理草稿…"]
+                          "batchmenu", "batch", "批量处理草稿…",
+                          # ★★ 第二十批（v1.3.0 全自动导出 · 实验）
+                          "fullauto", "full_auto_export", "full_auto_done",
+                          "full_auto_fail", "全自动导出（实验）"]
         txt_miss += [f"{t}(需精确常量)" for t in need_txt_exact if t not in gconsts]
         print("GUI 必需名字缺失:", gmiss if gmiss else "无")
         print("GUI 必需文案缺失:", txt_miss if txt_miss else "无")

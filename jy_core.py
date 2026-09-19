@@ -242,6 +242,10 @@ def default_config():
         #     对话框消失也可能是用户取消了导出，自动还原等于猜。
         #   ★ 失败开放：枚举窗口出任何异常都当"没看见"，宁可漏提醒一次。
         "export_watch": True,
+        # ★★ 第二十批（v1.3.0 实验 · 全自动导出）：默认**关**。开了 = 授权伴侣在
+        #   「等你导出」之后自动拖入 → 发导出键（Ctrl+E）→ 回车确认 → 守望完成 →
+        #   自动还原。导出对话框不是我们画的，所以每一步都有"交回手动"的退路。
+        "full_auto_export": False,
     }
 
 
@@ -1279,6 +1283,101 @@ def batch_prepare_draft(cfg, draft_dir, st=None, cancel=None):
     _save_draft_via_return(cfg, say)
     say("✅ 这份就绪（打开即可导出）")
     return True, "就绪"
+
+
+# ================================================================ 全自动导出（第二十批 v1.3.0 · 实验）
+# ★ 流程的最后一段人工（拖入 + 按导出 + 守完成）到这里也自动化。**实验性、默认关**：
+#   导出对话框不是我们画的，里面每一版都可能变 —— 所以每一步都自带"不成就交回手动"
+#   的退路，绝不硬闯。开了这个开关 = 用户明确授权伴侣替他按导出键。
+FULLAUTO_EXPORT_KEY_DEFAULT = "ctrl+e"
+
+
+def full_auto_export(cfg, st=None, cancel=None):
+    """从「等你导出」状态接着走完最后一程：拖入 → 发导出键 → 确认 → 守望完成。
+
+    返回 (ok, msg)。**任何一步不成都如实交回手动** —— 手动导出的路随时都是通的，
+    这个函数只做"锦上添花"，绝不把用户逼进死角。中止抛 PipelineCancelled。
+    前置：`cfg["_final_path"]`（run_pipeline / batch_prepare_draft 会写）指向本轮产物。
+    """
+    def say(t, k="busy"):
+        _plog(f"[全自动] {t}")
+        if st:
+            try:
+                st(t, k)
+            except Exception:
+                pass
+
+    def _ck():
+        if _cancelled(cancel):
+            raise PipelineCancelled()
+
+    def _dlg_gone(timeout):
+        """导出对话框消失了没有（消失 = 导出流程走完/被取消）。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            _ck()
+            if not find_export_dialog():
+                return True
+            time.sleep(1)
+        return False
+
+    src = cfg.get("_final_path")
+    if not src or not Path(src).exists():
+        return False, "找不到本轮的预合成产物"
+    jy = find_jianying()
+    if not jy:
+        return False, "剪映窗口不在了"
+
+    # ① 自动拖入（真机验证过的那条路；内部每步自检，不成会把原因带回来）
+    exp = None
+    try:
+        for h, _t in explorer_windows():
+            r = window_rect(h)
+            if r and abs((r[2] - r[0]) - FOLDER_WIN_W) <= 40 \
+                    and abs((r[3] - r[1]) - FOLDER_WIN_H) <= 40:
+                exp = h          # 我们规整过的 1000x620 那扇，就是装产物的那扇
+                break
+    except Exception:
+        exp = None
+    say("自动拖入时间线…")
+    _ck()
+    if not drag_file_into_jianying(cfg, jy[0], Path(src), say, explorer_hwnd=exp):
+        return False, "自动拖入没走通（交回你手动拖）"
+
+    # ② 发导出快捷键（读用户实时绑法；剪映默认 Ctrl+E）
+    _ck()
+    keys = read_shortcut_all("exportVideo") or [FULLAUTO_EXPORT_KEY_DEFAULT]
+    _wait_foreground(jy[0], 10, say, cancel=cancel)
+    for k in keys:
+        send_combo(k)
+        time.sleep(0.4)
+    say("等导出窗口出现…")
+    dlg = None
+    t0 = time.time()
+    while time.time() - t0 < 20:
+        _ck()
+        dlg = find_export_dialog()
+        if dlg:
+            break
+        time.sleep(1)
+    if not dlg:
+        return False, "导出窗口没出现（快捷键可能被改绑了），交回你手动导出"
+
+    # ③ 回车确认（导出窗口的默认按钮就是「导出」）。15 秒没关就补一次；
+    #    还不关 = 大概率焦点/布局和预期不一样 —— **不硬闯**，请用户点一下，
+    #    我们继续守望"对话框消失"（他什么时候导完我们都接得住）。
+    for _attempt in range(2):
+        _ck()
+        send_combo("enter")
+        if _dlg_gone(15):
+            break
+    else:
+        say("请在导出窗口点一下「导出」—— 我继续等你导完")
+    say("守望导出完成…")
+    if not _dlg_gone(30 * 60):
+        return False, "等了 30 分钟还没等到导出完成（先交回手动，还原随时可用）"
+    say("✅ 导出完成")
+    return True, "导出完成"
 
 
 # ================================================================ 极简 UIA（零依赖）

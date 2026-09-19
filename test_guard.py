@@ -2402,6 +2402,81 @@ check("㉬ 收尾有 batch 专属分支（明细进弹窗，球上只放结论�
 check("㉭ ★ 中止时还原当前草稿（批量与单份同一个『停=还原』语义）",
       "core.restore_draft(self.cfg" in _gsrc29, True)
 
+# ================================================================ [30]
+# ★ 第二十批（v1.3.0 全自动导出 · 实验）：拖入 → 导出键 → 确认 → 守完成。
+#   铁律：默认关（替用户按导出键必须显式授权）；每一步不成都**交回手动**，绝不硬闯。
+print("[30] ★ 第二十批（全自动导出 · 实验）：最后一程也走完，退路永远留着")
+check("㉠ full_auto_export 默认关（替用户按键 = 必须显式授权）",
+      core.default_config().get("full_auto_export"), False)
+
+_ofj30 = core.find_jianying
+_oex30 = core.explorer_windows
+_odr30 = core.drag_file_into_jianying
+_orq30 = core.read_shortcut_all
+_ofg30 = core._wait_foreground
+_osc30 = core.send_combo
+_ofd30 = core.find_export_dialog
+_owa30 = core._wait_foreground
+try:
+    # ---- 前置缺失的两个诚实退路 ----
+    _r0 = core.full_auto_export({}, None, cancel=None)
+    check("㉡ 找不到本轮产物 → 如实退回（不瞎猜路径）",
+          (_r0[0], "产物" in _r0[1]), (False, True))
+    core.find_jianying = lambda *a, **k: None
+    _f30 = _fake = _d29 / "Resources" / "combination" / "x_video.mp4"
+    _r0b = core.full_auto_export({"_final_path": str(_f30)}, None, cancel=None)
+    check("㉢ 剪映窗口不在 → 如实退回", _r0b, (False, "剪映窗口不在了"))
+
+    # ---- 快乐路径（全桩）：拖入 → Ctrl+E → 回车 → 守到消失 ----
+    core.find_jianying = lambda *a, **k: (7, "剪映", "cls", 0, (0, 0, 800, 600))
+    core.explorer_windows = lambda: []
+    core.drag_file_into_jianying = lambda *a, **k: True
+    core.read_shortcut_all = lambda a: []            # 读不到 → 用默认 ctrl+e
+    core._wait_foreground = lambda *a, **k: True
+    _sent30 = []
+    core.send_combo = lambda k, hold=0.06: _sent30.append(k)
+    _dlg30 = (9, "导出", "Dlg", 0, (0, 0, 800, 600))
+    _finds30 = {"n": 0}
+
+    def _fd30():
+        _finds30["n"] += 1
+        return _dlg30 if _finds30["n"] == 1 else None   # 出现一次 → 之后都算消失
+    core.find_export_dialog = _fd30
+    _r1 = core.full_auto_export({"_final_path": str(_fake)}, None, cancel=None)
+    check("㉣ 快乐路径 → (True, 导出完成)", _r1, (True, "导出完成"))
+    check("㉤ 键序 = 导出键 + 回车确认（默认 ctrl+e 兜底生效）",
+          _sent30, ["ctrl+e", "enter"])
+    check("㉦ 每一步都带中止检查（探针接进整条链）",
+          "PipelineCancelled" in _inspect.getsource(core.full_auto_export), True)
+
+    # ---- 中止传播 ----
+    core.drag_file_into_jianying = lambda *a, **k: (_ for _ in ()).throw(
+        core.PipelineCancelled())
+    _tok30 = threading.Event()
+    _tok30.set()
+    _raised30 = False
+    try:
+        core.full_auto_export({"_final_path": str(_fake)}, None, cancel=_tok30)
+    except core.PipelineCancelled:
+        _raised30 = True
+    check("㉧ 中止 → 抛 PipelineCancelled（退回手动由 GUI 收尾）", _raised30, True)
+finally:
+    core.find_jianying, core.explorer_windows = _ofj30, _oex30
+    core.drag_file_into_jianying, core.read_shortcut_all = _odr30, _orq30
+    core._wait_foreground, core.send_combo = _ofg30, _osc30
+    core.find_export_dialog = _ofd30
+
+# ---- GUI 侧形状 ----
+_gsrc30 = open("剪映伴侣.py", encoding="utf-8").read()
+check("㉨ 菜单有「全自动导出（实验）」开关", '"fullauto"' in _gsrc30, True)
+check("㉩ 「等你导出」后挂钩全自动（after 2.5s 稳定延迟）",
+      "self.root.after(2500, self._run_full_auto)" in _gsrc30, True)
+check("㉪ 走通 → 自动还原（闭环）",
+      _gsrc30.count('elif item[0] == "full_auto_done"') == 1
+      and "_restore_draft()" in _gsrc30, True)
+check("㉫ 失败/中止 → 退回手动且等待态保留（绝不把用户逼进死角）",
+      'elif item[0] == "full_auto_fail"' in _gsrc30, True)
+
 print()
 print("失败项:", fails if fails else "无")
 sys.exit(1 if fails else 0)

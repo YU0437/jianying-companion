@@ -18,13 +18,23 @@ AUTH = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json
         "User-Agent": "jy-release"}
 
 
-def api(url, method="GET", data=None, headers=None, timeout=120):
+def api(url, method="GET", data=None, headers=None, timeout=120, _try=[0]):
+    """直连优先，失败自动换 127.0.0.1:7890 代理再试一次（国内网络两路都时好时坏）。"""
+    _try[0] += 1
     req = urllib.request.Request(url, method=method, data=data)
     req.add_header("User-Agent", "jy-release")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except Exception:
+        if _try[0] > 4:
+            raise
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+            {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}))
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read()
     return json.loads(body) if body else {}
 
 

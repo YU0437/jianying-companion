@@ -6,8 +6,8 @@ AppName=剪映伴侣
 ; ★ 显式 AppId：升级/重装时 Inno 靠它认"这是同一个程序"。
 ;   不写的话默认用 AppName，中文名一旦改了就会变成"两个程序"。
 AppId={{8F3A6C21-4B7D-4E5A-9C1E-2D5B7A90431F}
-AppVersion=1.2.0
-VersionInfoVersion=1.2.0.0
+AppVersion=1.3.0
+VersionInfoVersion=1.3.0.0
 VersionInfoDescription=剪映伴侣 - 预合成导出辅助
 AppPublisher=JianyingCompanion
 ; ★ 默认装到用户目录（不是 Program Files）—— 理由见下面 [Code] 里的说明：
@@ -16,7 +16,7 @@ AppPublisher=JianyingCompanion
 DefaultDirName={localappdata}\JianyingCompanion
 DefaultGroupName=剪映伴侣
 UninstallDisplayIcon={app}\剪映伴侣.exe
-OutputBaseFilename=剪映伴侣-Setup-1.2.0
+OutputBaseFilename=剪映伴侣-Setup-1.3.0
 OutputDir=installer
 Compression=lzma2/max
 SolidCompression=yes

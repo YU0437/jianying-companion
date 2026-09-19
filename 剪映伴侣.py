@@ -622,6 +622,7 @@ class Companion:
         _add("autodraft", "自动打开原草稿", self._toggle_auto_draft)
         _add("autodrag", "自动拖进时间线", self._toggle_auto_drag)
         _add("exportwatch", "导出守望（导完提醒还原）", self._toggle_export_watch)
+        _add("fullauto", "全自动导出（实验）", self._toggle_fullauto)
         _add("foldertidy", "文件夹窗口规整", self._toggle_folder_tidy)
         _add("guard", "导出拦截", self._toggle_guard)
         _add("autorun", "弹窗时自动接管", self._toggle_auto_run)
@@ -1668,6 +1669,7 @@ class Companion:
             core.save_config(self.cfg)
         except Exception:
             pass
+        self._sync_menu()
         if self.cfg["export_watch"]:
             self.set_state("busy", "导出守望已开",
                            sub="导出窗口一关就提醒你还原", hold=5)
@@ -1675,6 +1677,47 @@ class Companion:
             self._stop_export_watch()
             self.set_state("busy", "导出守望已关",
                            sub="导完自己记得回来点还原", hold=5)
+
+    def _toggle_fullauto(self):
+        """菜单开关：全自动导出（实验）。默认关 —— 开了就是授权替你按导出键。"""
+        self.cfg["full_auto_export"] = not self.cfg.get("full_auto_export", False)
+        try:
+            core.save_config(self.cfg)
+        except Exception:
+            pass
+        self._sync_menu()
+        if self.cfg["full_auto_export"]:
+            self.set_state("busy", "全自动导出已开（实验）",
+                           sub="拖入→导出→守望→自动还原，一条龙", hold=6)
+        else:
+            self.set_state("busy", "全自动导出已关",
+                           sub="拖入和导出交回你手动", hold=5)
+
+    def _run_full_auto(self):
+        """「等你导出」之后接管最后一程（v1.3.0 实验）。失败/中止一律退回手动。"""
+        if not self._await_restore:
+            return
+        if self._cancel is None:
+            self._cancel = threading.Event()
+        self._sync_menu()
+        self.set_state("busy", "全自动导出中…",
+                       sub="拖入 → 导出 → 守望完成 → 自动还原")
+        threading.Thread(target=self._fullauto_worker, daemon=True).start()
+
+    def _fullauto_worker(self):
+        try:
+            ok, msg = core.full_auto_export(self.cfg, self._on_status,
+                                            cancel=self._cancel)
+        except core.PipelineCancelled:
+            self.q.put(("full_auto_fail", "已中止 · 回到手动模式"))
+            return
+        except Exception as _e:
+            self.q.put(("full_auto_fail", f"全自动出错（{type(_e).__name__}）· 回到手动"))
+            return
+        if ok:
+            self.q.put(("full_auto_done", msg))
+        else:
+            self.q.put(("full_auto_fail", msg))
 
     def _restore_draft(self):
         """导出完成后：把草稿**还原回还没有预合成的那一版**。
@@ -1701,6 +1744,10 @@ class Companion:
                     "真的要再还原一次吗？",
                     parent=self.root):
                 return
+        self._start_restore()
+
+    def _start_restore(self):
+        """真正发起还原（_restore_draft 与全自动导出的收尾共用这一条路）。"""
         self._await_restore = False
         self._stop_export_watch()   # ★ 开始还原 = 守望结束（别让它再报"导出完成"）
         self.set_state("busy", "还原草稿中…", "写回预合成前的草稿 · 只动元数据")
@@ -2161,6 +2208,8 @@ class Companion:
                                   + ("✓" if self.cfg.get("auto_drag_product", True) else ""))
             self.menu.entryconfig(self._mi["exportwatch"], label="导出守望（导完提醒还原） "
                                   + ("✓" if self.cfg.get("export_watch", True) else ""))
+            self.menu.entryconfig(self._mi["fullauto"], label="全自动导出（实验） "
+                                  + ("✓" if self.cfg.get("full_auto_export", False) else ""))
             self.menu.entryconfig(self._mi["foldertidy"], label="文件夹窗口规整 "
                                   + ("✓" if self.cfg.get("folder_win_tidy", True) else ""))
             self.menu.entryconfig(self._mi["embed"], label="嵌入剪映界面 "
@@ -2426,6 +2475,16 @@ class Companion:
                         self.set_state(
                             "ask", "检测到导出完成",
                             sub="导出窗口关了 · 左键一键还原草稿", hold=12)
+                elif item[0] == "full_auto_done":
+                    # ★★ 第二十批（v1.3.0 实验）：全自动走通了 → 立刻还原草稿，
+                    #   一条龙闭环。注意**不能**走 _restore_draft —— 它开头的
+                    #   busy 护栏会把"全自动导出中…"这个状态挡回去（本轮踩过）。
+                    self._start_restore()
+                elif item[0] == "full_auto_fail":
+                    # 没走通（或用户中止）→ 退回手动。等待态原样保留：
+                    # 球还在「等你导出」，手动导出的路一直是通的。
+                    if self._await_restore:
+                        self.set_state("ok", "等你导出", sub=item[1], hold=10)
                 elif item[0] == "done":
                     _, ok, msg, rescue = item
                     # ★ 第十七批：一轮任务结束（不管成功/失败/中止）就把令牌撤掉。
@@ -2465,6 +2524,11 @@ class Companion:
                             #   见到"出现→消失"就主动提醒"可以还原了"，
                             #   把"导完还得记得回来"这段纯记忆的人工步骤消掉。
                             self._start_export_watch()
+                            # ★★ 第二十批（v1.3.0 实验）：开了全自动 → 接着把
+                            #   "拖入 → 导出 → 守完成 → 自动还原"也走完。
+                            #   稍等 2.5s 是给"文件夹弹出+选中"留出稳定时间。
+                            if self.cfg.get("full_auto_export"):
+                                self.root.after(2500, self._run_full_auto)
                             self.set_state("ok", "等你导出",
                                            sub="导出完点我 → 还原草稿（回到预合成前）",
                                            hold=0)

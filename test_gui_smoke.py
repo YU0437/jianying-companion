@@ -1042,6 +1042,66 @@ try:
         c._cancel = None
         c._await_restore = False
         c._batch_queue = []
+
+    # ================================================================ [13]
+    # ★ 第二十批（全自动导出 · 实验）：默认关；开了以后「等你导出」会自动接管；
+    #   走通→自动还原；没走通→退回手动且等待态保留。
+    print("[13] ★ 第二十批（全自动导出 · 实验）：接管最后一程，失败退回手动")
+    _onb13 = core.notify_box
+    _oth13 = gui.threading.Thread
+    core.notify_box = lambda *a, **k: None
+
+    class _NoThread13:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    gui.threading.Thread = _NoThread13
+    try:
+        check("① 全自动默认关（cfg 键已带出来）",
+              c.cfg.get("full_auto_export") is False, c.cfg.get("full_auto_export"))
+
+        # ② 开关打开 → 菜单打勾
+        c._toggle_fullauto()
+        check("② 打开后 cfg 为 True", c.cfg.get("full_auto_export") is True,
+              c.cfg.get("full_auto_export"))
+        check("② 菜单标签带 ✓", "✓" in c.menu.entrycget(c._mi["fullauto"], "label"),
+              c.menu.entrycget(c._mi["fullauto"], "label"))
+
+        # ③ 进入等待态后手动触发接管（Thread 桩住，流程体不真跑）
+        c._await_restore = True
+        c._cancel = None
+        c.state = ("ok", "等你导出")
+        c._run_full_auto()
+        check("③ ★ 接管：令牌挂上（中止可用）、状态=全自动导出中",
+              c._cancel is not None and c.state == ("busy", "全自动导出中…"),
+              (c._cancel, c.state))
+
+        # ④ 走通 → 直接走还原收尾（还原被桩住不会真跑，但状态机要对）
+        c.q.put(("full_auto_done", "导出完成"))
+        c._pump()
+        check("④ ★ 走通 → 自动还原（「还原草稿中…」，等待态撤掉）",
+              c.state == ("busy", "还原草稿中…") and not c._await_restore,
+              (c.state, c._await_restore))
+
+        # ⑤ 没走通 → 退回手动：等待态原样保留（手动导出的路永远是通的）
+        c._await_restore = True
+        c.q.put(("full_auto_fail", "自动拖入没走通（交回你手动拖）"))
+        c._pump()
+        check("⑤ ★ 失败 → 回「等你导出」+ 原因写在副标题",
+              c.state == ("ok", "等你导出"), c.state)
+
+        # ⑥ 关掉开关恢复
+        c._toggle_fullauto()
+        check("⑥ 再关一次恢复 False", c.cfg.get("full_auto_export") is False,
+              c.cfg.get("full_auto_export"))
+    finally:
+        core.notify_box = _onb13
+        gui.threading.Thread = _oth13
+        c._cancel = None
+        c._await_restore = False
 finally:
     try:
         if c:
