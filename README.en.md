@@ -115,7 +115,7 @@ Step-by-step guide: [docs/INSTALL.en.md](docs/INSTALL.en.md).
 ### Option 2 — Run from source
 
 ```bat
-git clone https://github.com/<your-name>/jianying-companion.git
+git clone https://github.com/YU0437/jianying-companion.git
 cd jianying-companion
 pip install -r requirements.txt   :: to just run it, the minimum is  pip install pillow
 python 剪映伴侣.py

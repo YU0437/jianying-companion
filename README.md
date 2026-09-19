@@ -101,7 +101,7 @@
 ### 方式二：从源码运行
 
 ```bat
-git clone https://github.com/<你的用户名>/jianying-companion.git
+git clone https://github.com/YU0437/jianying-companion.git
 cd jianying-companion
 pip install -r requirements.txt   :: 只想跑起来的话，最小是 pip install pillow
 python 剪映伴侣.py
