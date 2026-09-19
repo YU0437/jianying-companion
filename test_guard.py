@@ -2304,6 +2304,104 @@ _blk28 = _gsrc28[_idx28:_idx28 + 700]
 check("㉯ ★★★ 守望只提醒、绝不自动还原（export_done 分支里不许碰 _restore_draft）",
       "_restore_draft" not in _blk28, True)
 
+# ================================================================ [29]
+# ★ 第十九批（v1.2.0 批量队列）：N 份草稿逐份自动「备份→预合成→登记→清空→落盘」。
+#   铁律：①清空前核对打开的草稿名（绝不清错草稿）；②每份独立备份；③中止=还原当前份并停队列。
+print("[29] ★ 第十九批（批量队列）：一次排队 N 份，重活全包，导出仍归你")
+_tmp29 = tempfile.mkdtemp(prefix="batch29_")
+_r29 = Path(_tmp29)
+for nm, has in (("A甲", True), ("B乙", False)):
+    cdir = _r29 / nm / "Resources" / "combination"
+    cdir.mkdir(parents=True)
+    if has:
+        (cdir / "x_video.mp4").write_bytes(b"0" * 100)
+_cands29 = core.list_batch_candidates(_r29, limit=8)
+check("㉠ 只列「有预合成素材」的草稿（没有素材的不进队列）",
+      [n for _d, n, _m in _cands29], ["A甲"])
+check("㉡ 返回的是 (draft_dir, name, mtime) 三元组",
+      (len(_cands29[0]), _cands29[0][0].name), (3, "A甲"))
+check("㉢ limit 生效（绝不吐一长串）",
+      len(core.list_batch_candidates(_r29, limit=1)), 1)
+
+_ore29 = core._restart_and_enter
+_odn29 = core.open_draft_name
+_obk29 = core.backup_draft_json
+_osk29 = core._send_keys_sequence
+_owc29 = core.wait_new_combo
+_owf29 = core.wait_file_settled
+_ocd29 = core.commit_draft_registration
+_oct29 = core._clear_timeline
+_ors29 = core.read_shortcut_all
+_osc29 = core.send_combo
+_opg29 = core.product_guid
+_d29 = _r29 / "A甲"
+try:
+    # ---- 落盘键：读实时绑法，读不到用默认 ----
+    _sent29 = []
+    core.read_shortcut_all = lambda a: ["ctrl+alt+q"] if a == "returnDraftPage" else []
+    core.send_combo = lambda k, hold=0.06: _sent29.append(k)
+    check("㉣ 落盘走「返回草稿页」（快捷键表里没有『保存』，这是唯一通道）",
+          (core._save_draft_via_return({}), _sent29), (True, ["ctrl+alt+q"]))
+    core.read_shortcut_all = lambda a: []
+    _sent29.clear()
+    core._save_draft_via_return({})
+    check("㉤ 绑法读不到 → 用默认 Ctrl+Alt+Q（不是不发）", _sent29, ["Ctrl+Alt+Q"])
+
+    # ---- batch_prepare_draft 的三个安全检查点 ----
+    core._restart_and_enter = lambda *a, **k: (7, "剪映", "cls", 0, (0, 0, 800, 600))
+    core.open_draft_name = lambda root, since=0: "B乙"          # 打开的不是目标
+    core.backup_draft_json = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("不该走到备份"))
+    _r1 = core.batch_prepare_draft({}, _d29, None, cancel=None)
+    check("㉥ ★★★ 打开的草稿名对不上 → 拒绝处理（绝不动别的草稿）",
+          (_r1[0], "B乙" in _r1[1]), (False, True))
+    core.open_draft_name = lambda root, since=0: "A甲"
+    core.backup_draft_json = lambda *a, **k: None               # 备份失败
+    _r2 = core.batch_prepare_draft({}, _d29, None, cancel=None)
+    check("㉦ 备份没做成 → 跳过这份（不敢动没备份的草稿）",
+          (_r2[0], "备份" in _r2[1]), (False, True))
+
+    # ---- 快乐路径（全部桩掉，一路到清空+落盘）----
+    _fake = _d29 / "Resources" / "combination" / "new_video.mp4"
+    core.backup_draft_json = lambda *a, **k: object()
+    core._send_keys_sequence = lambda cfg, hwnd, st: True
+    core.wait_new_combo = lambda *a, **k: _fake
+    core.wait_file_settled = lambda *a, **k: None
+    core.commit_draft_registration = lambda *a, **k: True
+    core.product_guid = lambda p: "guid-29"
+    core._clear_timeline = lambda cfg, hwnd, st, cancel=None: True
+    _r3 = core.batch_prepare_draft({}, _d29, None, cancel=None)
+    check("㉧ 全链路（桩）跑通 → (True, 就绪)", _r3, (True, "就绪"))
+    check("㉨ 清空后发「返回草稿页」落盘（不清不存 = 白干）", len(_sent29) >= 1, True)
+
+    # ---- 中止 = 抛 PipelineCancelled（还原由调用方做）----
+    core._restart_and_enter = lambda *a, **k: (_ for _ in ()).throw(
+        core.PipelineCancelled())
+    _raised29 = False
+    try:
+        core.batch_prepare_draft({}, _d29, None, cancel=None)
+    except core.PipelineCancelled:
+        _raised29 = True
+    check("㉩ ★★★ 中止 → 抛 PipelineCancelled（队列据此还原当前份并停）",
+          _raised29, True)
+finally:
+    core._restart_and_enter, core.open_draft_name = _ore29, _odn29
+    core.backup_draft_json, core._send_keys_sequence = _obk29, _osk29
+    core.wait_new_combo, core.wait_file_settled = _owc29, _owf29
+    core.commit_draft_registration, core._clear_timeline = _ocd29, _oct29
+    core.read_shortcut_all, core.send_combo = _ors29, _osc29
+    core.product_guid = _opg29
+
+# ---- GUI 侧形状 ----
+_gsrc29 = open("剪映伴侣.py", encoding="utf-8").read()
+check("㉪ 菜单有「批量处理草稿…」级联入口", '"批量处理草稿…"' in _gsrc29, True)
+check("㉫ 子菜单点开时现扫现填（postcommand）", "postcommand=self._fill_batch_menu" in _gsrc29,
+      True)
+check("㉬ 收尾有 batch 专属分支（明细进弹窗，球上只放结论）",
+      'rescue == "batch"' in _gsrc29 and "批量完成" in _gsrc29, True)
+check("㉭ ★ 中止时还原当前草稿（批量与单份同一个『停=还原』语义）",
+      "core.restore_draft(self.cfg" in _gsrc29, True)
+
 print()
 print("失败项:", fails if fails else "无")
 sys.exit(1 if fails else 0)

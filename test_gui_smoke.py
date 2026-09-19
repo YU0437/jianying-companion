@@ -966,6 +966,82 @@ try:
         c._watch_stop = None
         c._await_restore = False
         c._cancel = None
+
+    # ================================================================ [12]
+    # ★ 第十九批（批量队列）：菜单现扫现填；确认后才开跑；收尾是「批量完成」分支。
+    print("[12] ★ 第十九批（批量队列）：一次排队 N 份，重活全包")
+    _orr12 = core.resolve_root
+    _olb12 = core.list_batch_candidates
+    _oya12 = gui.ask_yes
+    _onb12 = core.notify_box
+    _oth12 = gui.threading.Thread
+    core.notify_box = lambda *a, **k: None
+    gui.ask_yes = lambda *a, **k: False          # 先一律拒绝
+
+    class _NoThread12:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    gui.threading.Thread = _NoThread12
+    try:
+        # ① 扫不到候选 → 子菜单只给一句说明（不许是空菜单）
+        core.resolve_root = lambda cfg, cb=None: None
+        c._fill_batch_menu()
+        check("① 没候选 → 子菜单给说明（不是空白）",
+              c._batch_menu.index("end") == 0
+              and "没找到" in c._batch_menu.entrycget(0, "label"),
+              c._batch_menu.index("end"))
+
+        # ② 有候选 → 逐份 + 分隔线 + 「全部处理」
+        _dA, _dB = Path(r"C:\f\A甲"), Path(r"C:\f\B乙")
+        core.resolve_root = lambda cfg, cb=None: _dA.parent
+        core.list_batch_candidates = lambda root, limit=8, **k: [
+            (_dA, "A甲", 2), (_dB, "B乙", 1)]
+        c._fill_batch_menu()
+        _labels12 = [c._batch_menu.entrycget(i, "label")
+                     for i in range(0, c._batch_menu.index("end") + 1)
+                     if c._batch_menu.type(i) != "separator"]
+        check("② 子菜单逐份列出（含「全部处理」）",
+              any("A甲" in l for l in _labels12) and any("B乙" in l for l in _labels12)
+              and any("全部处理" in l for l in _labels12), _labels12)
+
+        # ③ 点了候选但拒绝确认 → 什么都不发生
+        c.state = ("idle", "一键导出")
+        c._cancel = None
+        c._start_batch([_dA])
+        check("③ 拒绝确认 → 不开跑（没有令牌、状态没变）",
+              c._cancel is None and c.state == ("idle", "一键导出"),
+              (c._cancel, c.state))
+
+        # ④ 确认 → 令牌挂上、进入批量状态（Thread 被桩住，流程体不真跑）
+        gui.ask_yes = lambda *a, **k: True
+        c._start_batch([_dA, _dB])
+        check("④ ★ 确认后开跑：令牌挂上（中止可用）、状态=批量处理中",
+              c._cancel is not None and c.state[0] == "busy"
+              and "批量" in c.state[1], (c._cancel, c.state))
+        check("④ 队列存到了 _batch_queue（2 份）",
+              len(getattr(c, "_batch_queue", [])) == 2, c._batch_queue)
+
+        # ⑤ 收尾走 batch 专属分支：球上只放结论，明细在弹窗里
+        c.q.put(("done", True, "批量处理完成：2/2 份就绪。", "batch"))
+        c._pump()
+        check("⑤ ★ 收尾 =「批量完成」（明细进弹窗，不塞球的文案）",
+              c.state == ("ok", "批量完成"), c.state)
+        check("⑤ 令牌清掉、不置 await_restore",
+              c._cancel is None and not c._await_restore,
+              (c._cancel, c._await_restore))
+    finally:
+        core.resolve_root = _orr12
+        core.list_batch_candidates = _olb12
+        gui.ask_yes = _oya12
+        core.notify_box = _onb12
+        gui.threading.Thread = _oth12
+        c._cancel = None
+        c._await_restore = False
+        c._batch_queue = []
 finally:
     try:
         if c:

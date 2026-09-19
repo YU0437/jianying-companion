@@ -578,6 +578,13 @@ class Companion:
         #   ★ 只在"真的能中止"时可点（`_sync_menu` 负责置灰），不做点了没反应的死入口。
         _add("abort", "中止本次流程（自动还原）", self._abort_pipeline)
         self.menu.add_separator()
+        # ★★ 第十九批（v1.2.0 批量队列）：多份草稿逐份手工跑太磨人。这里是入口，
+        #   子菜单在**点开时**才现扫现填（草稿列表会变，不能建菜单时一次定死）。
+        _mbatch = tk.Menu(self.menu, tearoff=0,
+                          postcommand=self._fill_batch_menu)
+        self._batch_menu = _mbatch
+        self.menu.add_cascade(label="批量处理草稿…", menu=_mbatch)
+        self._mi["batchmenu"] = self.menu.index("end")
         _add("launch", "启动剪映", self._launch_jy)
         # ★ 2026-09-19 第十四批（用户"继续优化" · 分发）：分发病因第 1 条是
         #   "路径假设"——绿色版 / 自定义安装 / 装在别的盘的人，"问进程 + 常见落点"
@@ -1268,6 +1275,120 @@ class Companion:
             self._start_pipeline()
         else:
             self._launch_jy(then_run=True)
+
+    # ==================== 批量队列（第十九批 v1.2.0） ====================
+
+    def _fill_batch_menu(self):
+        """点开「批量处理草稿…」时**现扫现填**候选草稿（最多 8 份，最近在前）。
+
+        扫描是有界的（3s 预算），但仍是磁盘 IO —— 放在 postcommand 里意味着
+        只在用户真的点开菜单时才扫一次，平时零开销。"""
+        m = getattr(self, "_batch_menu", None)
+        if m is None:
+            return
+        m.delete(0, "end")
+        cands = []
+        try:
+            root = core.resolve_root(self.cfg, None)
+            if root:
+                cands = core.list_batch_candidates(root, limit=8)
+        except Exception as _e:
+            print(f"[batch] 列候选失败: {type(_e).__name__}: {_e}", flush=True)
+        if not cands:
+            m.add_command(label="（草稿目录里没找到带预合成素材的草稿）",
+                         state="disabled")
+            return
+        for d, name, _mt in cands:
+            m.add_command(label=f"「{name}」",
+                          command=lambda dd=d: self._start_batch([dd]))
+        m.add_separator()
+        m.add_command(label=f"全部处理（{len(cands)} 份，按最近排序）",
+                      command=lambda: self._start_batch([d for d, _n, _mt in cands]))
+
+    def _start_batch(self, drafts):
+        """排队跑批量：逐份 batch_prepare_draft，每份之间不用用户动手。"""
+        if self.state[0] == "busy" or self._cancel is not None:
+            show_info("批量处理", "上一轮任务还在跑。等它结束（或先中止）再批量。",
+                      parent=self.root)
+            return
+        if not drafts:
+            return
+        names = "、".join(Path(d).name for d in drafts[:5]) + ("…" if len(drafts) > 5 else "")
+        if not ask_yes(
+                "批量处理草稿",
+                f"将要**自动逐份**处理 {len(drafts)} 份草稿：\n{names}\n\n"
+                "每一份都会：备份 → 预合成 → 清空原时间线，\n"
+                "跑完就处于「打开即可导出」的状态（导出仍由你自己点）。\n\n"
+                "随时可以中止：会还原**当前这一份**并停下，后面的不再动。\n"
+                "整个过程大约每份 1~2 分钟，开始后请别动鼠标键盘。",
+                parent=self.root):
+            return
+        self._await_restore = False
+        self._stop_export_watch()
+        self._cancel = threading.Event()
+        self._batch_queue = [Path(d) for d in drafts]
+        self.set_state("busy", "批量处理中…",
+                       sub=f"共 {len(drafts)} 份 · 每份跑完自动接下一份", pct=2)
+        self._sync_menu()
+        threading.Thread(target=self._batch_worker, daemon=True).start()
+
+    def _batch_worker(self):
+        """批量工作线程：逐份调用内核 batch_prepare_draft，汇总结果。
+
+        ★ 中止语义与单份一致：当前这份**已经动过**（有备份）→ 先还原再停；
+          还没动 → 直接停。后面的草稿一律不再碰。"""
+        queue = list(getattr(self, "_batch_queue", []))
+        total = len(queue)
+        results = []
+        cancelled = False
+        for i, d in enumerate(queue, 1):
+            if core.is_cancelled(self._cancel):
+                cancelled = True
+                break
+            prefix = f"[{i}/{total}] "
+
+            def st(t, k="busy", pct=None, sub=None, _i=i, _d=d):
+                self._on_status(f"{prefix}「{_d.name}」{t}", k,
+                                pct if pct is not None else int(2 + 96 * (_i - 1) / total),
+                                sub=sub)
+
+            try:
+                ok, msg = core.batch_prepare_draft(self.cfg, d, st,
+                                                   cancel=self._cancel)
+                results.append((d.name, ok, msg))
+            except core.PipelineCancelled:
+                cancelled = True
+                # 当前这份动过吗？批量每份都先备份再动 —— 只要走到备份之后就要还原。
+                try:
+                    binfo = core.backup_info(self.cfg)
+                except Exception:
+                    binfo = None
+                if binfo:
+                    st("已中止 · 正在还原当前草稿…", "busy")
+                    cap = {}
+
+                    def _fin(ok, msg, _cap=cap):
+                        _cap["r"] = (ok, msg)
+
+                    core.restore_draft(self.cfg, st, _fin)
+                    results.append((d.name, False, "已中止并还原"))
+                else:
+                    results.append((d.name, False, "已中止（还没动这份）"))
+                break
+            except Exception as _e:
+                results.append((d.name, False, f"出错：{type(_e).__name__}: {_e}"))
+        ok_n = sum(1 for _n, ok, _m in results if ok)
+        if cancelled:
+            self.q.put(("done", True,
+                        "批量已中止。\n" + "\n".join(f"· {n}: {m}" for n, _ok, m in results),
+                        "abort"))
+            return
+        lines = [f"批量处理完成：{ok_n}/{total} 份就绪（打开即可导出）。", ""]
+        for n, ok, m in results:
+            lines.append(f"· {'✅' if ok else '⚠️'} {n}：{m}")
+        lines += ["", "导出某份时：打开它 → 左键点球「一键导出」→ 走到拖入那步即可"
+                      "（预合成都已经做完了）。"]
+        self.q.put(("done", True, "\n".join(lines), "batch"))
 
     def _start_pipeline(self):
         """起一轮「一键导出」，并挂上可中止令牌（第十七批）。
@@ -2322,6 +2443,12 @@ class Companion:
                             self._await_restore = False
                             self.set_state("ok", "已中止", sub="草稿已还原到预合成前",
                                            hold=10)
+                        elif rescue == "batch":
+                            # ★★ 第十九批：批量收尾 —— 每份的就绪/失败明细在弹窗里，
+                            #   球上只放一句结论（别把 8 行明细塞进球的两行文案）。
+                            self._await_restore = False
+                            self.set_state("ok", "批量完成",
+                                           sub="明细见弹窗 · 每份打开即可导出", hold=10)
                         elif rescue == "launch":
                             # ★ 第十四批：启动超时不当"成功"。正常路径下 ok 是 False 走 else；
                             #   这一支只是防御（万一将来有"启动成功但流程没跑"的 ok=True 路径）。

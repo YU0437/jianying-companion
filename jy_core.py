@@ -1123,6 +1123,164 @@ def watch_export_dialog(stop, poll=1.0, timeout=6 * 3600):
         return "stopped"
 
 
+# ================================================================ 批量队列（第十九批 v1.2.0）
+# ★ 用户的真痛点：草稿不止一份，每份都要「打开 → 点一键导出 → 等重启 → 等你打开 →
+#   等 → 清空 → 导出」来一整遍。批量 = 把**重活**（备份/预合成/登记/清空）逐份自动做完，
+#   每份跑完都停在"打开即导出"的就绪态；导出本身仍由用户做（剪映的导出对话框不是
+#   我们该替用户按的东西，见 v1.3.0 之前的设计边界）。
+def list_batch_candidates(root, limit=8, budget=3.0, max_dirs=4000):
+    """有界扫描草稿根目录，列出「带预合成素材」的草稿，按最近使用排序。
+
+    返回 [(draft_dir, name, mtime)]，最多 limit 份。
+    ★ 有界：秒数预算 + 目录数双封顶（沿用 draft_root_has_combos 的思路），
+      绝不 rglob 全盘慢扫 —— 草稿结构很浅（根/<草稿名>/Resources/combination）。
+    ★ 谁有资格进批量：里面**有 combination 素材**的草稿（没有素材=没得预合成）。
+    """
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    t0 = time.time()
+    found = {}
+    stack = [(base, 0)]
+    n = 0
+    try:
+        while stack and n < max_dirs and time.time() - t0 < budget and len(found) < limit * 4:
+            d, depth = stack.pop()
+            n += 1
+            try:
+                if d.name == "combination" and d.is_dir():
+                    f = pick_combo_file(d)
+                    if f:
+                        draft_dir = d.parent.parent
+                        if draft_dir.is_dir() and str(draft_dir) not in found:
+                            found[str(draft_dir)] = (draft_dir, draft_dir.name,
+                                                     f.stat().st_mtime)
+                    continue
+                if depth >= 3:
+                    continue
+                for sub in d.iterdir():
+                    if sub.is_dir():
+                        stack.append((sub, depth + 1))
+            except Exception:
+                continue
+    except Exception as _e:
+        _plog(f"[批量] 扫描候选出错（按已找到的处理）: {type(_e).__name__}: {_e}")
+    out = sorted(found.values(), key=lambda x: x[2], reverse=True)
+    return out[:limit]
+
+
+def _save_draft_via_return(cfg, st=None):
+    """让剪映**落盘**：发「返回草稿页」（快捷键表里没有"保存"，这是唯一手段）。
+
+    读用户的实时绑法（改过也能跟上）；发完等 2 秒让剪映写完。
+    返回 True/False（键有没有发出去——发没发成和保存成功是两回事，但这是
+    整个流程都在依赖的持久化通道，不再重复验证）。"""
+    try:
+        keys = read_shortcut_all("returnDraftPage")
+        if not keys:
+            keys = ["Ctrl+Alt+Q"]
+        for k in keys:
+            send_combo(k)
+            time.sleep(0.4)
+        time.sleep(2)
+        return True
+    except Exception as _e:
+        _plog(f"[批量] 发「返回草稿页」失败: {type(_e).__name__}: {_e}")
+        if st:
+            try:
+                st("落盘键没发出去", "err")
+            except Exception:
+                pass
+        return False
+
+
+def batch_prepare_draft(cfg, draft_dir, st=None, cancel=None):
+    """对**一份**草稿自动做完「打开 → 备份 → 预合成 → 登记 → 重启进入 → 清空 → 落盘」。
+
+    跑完这份草稿就处于"打开即导出"的就绪态（时间线上只剩预合成产物）。
+    返回 (ok: bool, msg: str)；**用户中止时抛 PipelineCancelled**（调用方负责
+    还原当前草稿并停掉队列 —— 与单份流程的"中止=还原"同一个语义）。
+    ★ 备份在本草稿预合成之前做；每一份的备份都独立记在桌面上。
+    ★ 清空之前的草稿名核对与单份流程同样铁面：打开的不是目标草稿就**绝不碰时间线**。
+    """
+    def say(t, k="busy"):
+        _plog(f"[批量] {Path(draft_dir).name} · {t}")
+        if st:
+            try:
+                st(t, k)
+            except Exception:
+                pass
+
+    def _ck():
+        if _cancelled(cancel):
+            raise PipelineCancelled()
+
+    draft_dir = Path(draft_dir)
+    name = draft_dir.name
+    root = draft_dir.parent
+    # 批量模式**强制**允许自动打开草稿（每份都靠用户手点就不叫批量了）；
+    # 用副本传下去，不改用户配置。
+    cfg2 = dict(cfg)
+    cfg2["auto_open_draft"] = True
+
+    # ① 重启剪映并自动打开这份草稿
+    say(f"打开草稿「{name}」…")
+    t_kill1 = time.time()
+    hwnd = _restart_and_enter(cfg2, say, enter=True, draft_hint=name,
+                              draft_dir=draft_dir, cancel=cancel)
+    _ck()
+    if not hwnd:
+        return False, "没能自动打开草稿（首页没找到/没点中卡片）"
+    opened = open_draft_name(root, since=t_kill1)
+    if opened and opened != name:
+        return False, f"打开的是「{opened}」不是「{name}」——为安全起见跳过这份"
+
+    # ② 备份（预合成前）—— 每份独立一份，还原互不影响
+    say(f"备份「{name}」…")
+    if backup_draft_json(cfg, draft_dir, say, tag="预合成前") is None:
+        return False, "备份没做成 —— 不敢动没备份的草稿，跳过"
+
+    # ③ 预合成三连（Ctrl+A → 复合 → 预合成）
+    before = {}
+    for _d, combo, mt in combo_dirs(root):
+        before[str(combo)] = mt
+    _ck()
+    if not _send_keys_sequence(cfg, hwnd, say):
+        return False, "快捷键没发成功"
+    src = wait_new_combo(root, before, timeout=120, status_cb=say, cancel=cancel)
+    _ck()
+    if not src:
+        return False, "预合成没出产物（这轮渲染失败了？）"
+    say("等待产物落盘…")
+    wait_file_settled(src, timeout=60, status_cb=say, cancel=cancel)
+    _ck()
+    guid = product_guid(src)
+    if not commit_draft_registration(draft_dir, guid, say, timeout=30, cancel=cancel):
+        return False, "预合成登记没写进去（导出会报「媒体格式不支持」），已跳过清空"
+
+    # ④ 重启并回到这份草稿，把原时间线清空
+    say("重启剪映刷新…")
+    t_kill2 = time.time()
+    hwnd2 = _restart_and_enter(cfg2, say, enter=True, draft_hint=name,
+                               draft_dir=draft_dir, cancel=cancel)
+    _ck()
+    if not hwnd2:
+        return False, "重启后没能回到草稿"
+    wait_file_settled(src, timeout=60, status_cb=say, cancel=cancel)
+    _ck()
+    opened2 = open_draft_name(root, since=t_kill2)
+    if opened2 and opened2 != name:
+        return False, f"重启后打开的是「{opened2}」—— 绝不清错草稿，跳过"
+    say("清空原时间线…")
+    if not _clear_timeline(cfg, hwnd2, say, cancel=cancel):
+        return False, "清空时间线没成功（这份草稿保持原样，可单独重试）"
+
+    # ⑤ 落盘（发「返回草稿页」持久化"只剩产物"的状态），然后回首页等下一份
+    _save_draft_via_return(cfg, say)
+    say("✅ 这份就绪（打开即可导出）")
+    return True, "就绪"
+
+
 # ================================================================ 极简 UIA（零依赖）
 # ★ 为什么自己写：伴侣要打成**单文件 exe**（PyInstaller onefile），多引一个 COM 封装库
 #   （pywinauto / uiautomation）就要多几 MB，而且在冻结环境里很不稳（comtypes 的
