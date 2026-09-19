@@ -19,13 +19,15 @@
 
 ```bat
 python -m venv C:\path\to\envs\tk
-C:\path\to\envs\tk\Scripts\pip install pillow pyinstaller pyflakes
+C:\path\to\envs\tk\Scripts\pip install -r requirements.txt
+:: Just to run it (no installer): the minimal set is  pip install pillow
 ```
 
 | Needed | Notes |
 |---|---|
 | Python **3.10+** (developed on 3.13) | `tkinter` required (bundled in the official Windows installer) |
-| `pillow` | The **only** third-party runtime dependency (screen capture, pixel comparison) |
+| `pillow` | The **only required** third-party runtime dependency (screen capture, pixel comparison) |
+| `pywinauto` | **Optional but recommended**: the fallback path that clicks the taskbar button when another window covers Jianying. Its `import` is wrapped in `try`, so it runs without it |
 | `pyinstaller` | Build-time only |
 | `pyflakes` | Static check only |
 | Inno Setup 6 | Only for building the installer ([download](https://jrsoftware.org/isdl.php)) |

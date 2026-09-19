@@ -117,7 +117,7 @@ Step-by-step guide: [docs/INSTALL.en.md](docs/INSTALL.en.md).
 ```bat
 git clone https://github.com/<your-name>/jianying-companion.git
 cd jianying-companion
-pip install pillow
+pip install -r requirements.txt   :: to just run it, the minimum is  pip install pillow
 python 剪映伴侣.py
 ```
 
@@ -256,6 +256,10 @@ jianying-precomp/
 ├── test_settle.py               # File-settle detection
 ├── _test_backup_restore.py      # Offline: backup/restore + red-line guards
 ├── _verify_exe.py               # Post-build: verify the exe really contains the code/strings
+├── requirements.txt             # Dependencies and pinned versions
+├── ChineseSimplified.isl        # Chinese wizard for the installer (third-party — see NOTICE.md)
+├── LICENSE / NOTICE.md          # MIT + third-party notices
+├── CHANGELOG.md
 └── docs/                        # Install guide & build guide (CN + EN)
 ```
 
@@ -278,6 +282,10 @@ The full release pipeline (including packaging and verification) is in
 ## License
 
 [MIT](LICENSE)
+
+One file in this repo is **not** authored here: `ChineseSimplified.isl` (the Simplified-Chinese
+language file for the Inno Setup wizard, MIT-licensed). See [NOTICE.md](NOTICE.md) for provenance
+and the full license text.
 
 ## Trademarks
 

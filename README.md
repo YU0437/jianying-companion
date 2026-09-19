@@ -103,7 +103,7 @@
 ```bat
 git clone https://github.com/<你的用户名>/jianying-companion.git
 cd jianying-companion
-pip install pillow
+pip install -r requirements.txt   :: 只想跑起来的话，最小是 pip install pillow
 python 剪映伴侣.py
 ```
 
@@ -229,6 +229,10 @@ jianying-precomp/
 ├── test_settle.py               # 文件落盘判定
 ├── _test_backup_restore.py      # 离线：备份/还原 + 红线守卫
 ├── _verify_exe.py               # 打完之后验 exe 里到底有没有那些函数和文案
+├── requirements.txt             # 依赖与版本
+├── ChineseSimplified.isl        # 安装包的中文向导（第三方，见 NOTICE.md）
+├── LICENSE / NOTICE.md          # MIT + 第三方资源声明
+├── CHANGELOG.md
 └── docs/                        # 安装教程 / 构建说明（中英）
 ```
 
@@ -249,6 +253,9 @@ python _test_backup_restore.py
 ## 许可证
 
 [MIT](LICENSE)
+
+仓库里有一个**不是本作者原创**的文件：`ChineseSimplified.isl`（Inno Setup 简体中文语言文件，
+用于安装向导界面，MIT 许可）。来源与完整许可文本见 [NOTICE.md](NOTICE.md)。
 
 ## 商标
 
