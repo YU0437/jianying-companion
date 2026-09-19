@@ -5,6 +5,14 @@
 > 把剪映「预合成」之后那段**要重复按快捷键、要手动杀进程、要清空时间线**的活，
 > 交给一个悬浮球替你按。**它只模拟键鼠、只摆窗口 —— 不碰、不改、不解密任何视频文件。**
 
+![版本](https://img.shields.io/github/v/release/YU0437/jianying-companion?label=%E7%89%88%E6%9C%AC)
+[![License](https://img.shields.io/github/license/YU0437/jianying-companion)](LICENSE)
+![平台](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D6)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![红线](https://img.shields.io/badge/%E4%B8%8D%E7%A2%B0%E8%A7%86%E9%A2%91%E6%96%87%E4%BB%B6-%E4%B8%80%E5%AD%97%E8%8A%82%E4%B8%8D%E5%8A%A8-critical)
+
+![界面预览：悬浮球的四种状态](docs/ui-preview.png)
+
 ---
 
 ## ⚠️ 先看这段（免责声明）

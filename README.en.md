@@ -5,6 +5,14 @@
 > A floating ball that presses the hotkeys for you after Jianying Pro's "pre-compose" step.
 > **It only simulates keyboard/mouse input and moves windows — it never touches, modifies, or decrypts any video file.**
 
+[![Release](https://img.shields.io/github/v/release/YU0437/jianying-companion)](https://github.com/YU0437/jianying-companion/releases/latest)
+[![License](https://img.shields.io/github/license/YU0437/jianying-companion)](LICENSE)
+![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D6)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![Video files untouched](https://img.shields.io/badge/video_files-byte_untouched-critical)
+
+![UI preview: four states of the floating ball](docs/ui-preview.png)
+
 ---
 
 ## ⚠️ Read this first (disclaimer)
