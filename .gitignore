@@ -1,0 +1,58 @@
+# ============================================================
+# 构建产物 / 缓存
+# ============================================================
+__pycache__/
+*.py[cod]
+*.pyo
+build/
+dist/
+installer/
+*.spec.bak
+*.log
+
+# ============================================================
+# 本机运行数据 —— **含个人绝对路径，绝不允许入库**
+#   （伴侣配置.json 里有你的剪映安装路径和草稿目录；
+#     运行日志.txt 里同样有路径、草稿名等本机信息）
+# ============================================================
+伴侣配置.json
+伴侣配置.json.bak_*
+运行日志.txt
+_自动配置结果.txt
+
+# ============================================================
+# 开发期的试探脚本 / 截图 / 临时日志（不是发布内容）
+#   这些是当时排查问题写的一次性脚本，留在作者本机即可。
+#   正式的回归测试在下面「保留」清单里。
+# ============================================================
+_probe_*.py
+probe_uia.py
+_measure_accuracy.py
+_test_autoopen.py
+_test_drag.py
+test_bgclick.py
+test_calibrate.py
+test_click2.py
+test_cursor.py
+test_draft_arg.py
+test_drop.py
+test_e2e.py
+test_final.py
+test_focus.py
+test_kbd_methods.py
+test_keys.py
+test_keys_edit.py
+test_open_draft.py
+_result_*.png
+shots/
+run_result*.log
+
+# ============================================================
+# 保留（不要往上面加）
+#   源码：jy_core.py / 剪映伴侣.py / JianyingCompanion.spec
+#         version_info.txt / app.ico / 剪映伴侣安装包.iss / ChineseSimplified.isl
+#   工具：重启伴侣.py
+#   测试：test_guard.py / test_gui_smoke.py / test_settle.py
+#         _test_backup_restore.py / _verify_exe.py
+#   文档：使用说明.txt / README*.md / docs/
+# ============================================================
