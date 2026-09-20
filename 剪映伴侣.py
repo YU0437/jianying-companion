@@ -260,7 +260,21 @@ FONT_FAMILY = "Microsoft YaHei UI"
 #   只是把宽度和圆角平滑插值，底图是同一个多边形，不会突变。
 PILL_R = 16                # 展开成横条时的圆角（半径）★ 14→16：横条随球一起变高（第二十六批）
 BALL_MIN_W = 24            # 窗口最小宽度（兜底，别算出 0 或负数）
-ANIM_FRAME_MS = 16         # 动画帧间隔（≈60fps）
+ANIM_FRAME_MS = 16         # 动画**帧周期**（≈60fps）—— 是"周期"，不是"再等多久"！
+#   ★ 每帧至少留这么多空档给 Tk 事件循环（第二十七批）。
+#     `after(ms)` 的语义是「**这次回调返回之后**再过 ms」⇒ 真正的帧周期 = 渲染耗时 + ms。
+#     所以正确的排法是 `ms = max(ANIM_SLACK_MS, ANIM_FRAME_MS - 渲染耗时)`：
+#       · 球态一帧 ~2ms  ⇒ 排 14ms ⇒ 周期 16ms（稳稳 60fps）；
+#       · 形变放宽那几帧 ~33ms ⇒ 排 1ms ⇒ 周期 34ms（画得完就画，且不把消息泵堵死）。
+#     ★★ 千万别写成 `max(ANIM_FRAME_MS, 耗时 + 余量)` —— 那是把"周期"和"间隔"搞混了，
+#        重帧会变成 耗时+耗时+1（40ms 的帧直接掉到 ~12fps），比不改还糟。
+ANIM_SLACK_MS = 1
+#   跟随循环间隔（第二十七批：33 → 16）。`_poll_hover` + `_float_position` 一 tick 实测
+#   只有 ~19μs（0.06% 单核），提到 ~60Hz 的成本可以忽略，但拖动剪映时球的跟随
+#   从 ~31Hz 变成 ~60Hz —— 在 144Hz 的屏上那是"明显慢半拍"和"跟手"的区别。
+#   ★ 定速**不要**跟着刷新率走：这条是"采样目标窗口的位置"，不是固定节奏的动画，
+#     两帧之间漏掉一次采样只会晚一点点，不会产生节拍性抖动。
+FOLLOW_FAST_MS = 16
 ANIM_SHAPE_SECS = 0.18     # 形状（球↔横条）渐变时长
 ANIM_COLOR_SECS = 0.12     # 颜色渐变时长
 ANIM_PCT_SECS = 0.22       # 进度弧追赶时长
@@ -1504,12 +1518,33 @@ class Companion:
                              "dur": max(0.01, float(dur))}
         self._anim_kick()
 
-    def _anim_kick(self):
-        if self._anim_after is None:
-            try:
-                self._anim_after = self.root.after(ANIM_FRAME_MS, self._anim_tick)
-            except Exception:
-                self._anim_after = None
+    def _anim_kick(self, frame_ms=None):
+        """排下一帧动画。`frame_ms` = 刚才那一帧的**实测耗时**（毫秒）。
+
+        ★★ 第二十七批：原来是**无条件** `after(ANIM_FRAME_MS)`。
+
+        ★ 先把语义说清：`after(ms)` 不是"每 ms 一次"，而是「**这次回调返回之后**再过 ms」。
+          所以真实帧周期 = 渲染耗时 + ms。旧写法等于把周期写成 `耗时 + 16`：
+          球态一帧 ~2ms ⇒ 周期 18ms（55fps，肉眼还行），
+          但形变放宽那几帧 ~33ms ⇒ 周期 49ms（**只有 20fps**，用户看到的就是"卡卡的"）。
+
+        ★ 现在按**周期**倒推间隔：`ms = max(ANIM_SLACK_MS, ANIM_FRAME_MS - 耗时)`。
+          代价是"每帧都排一次 after"，收益是重帧不再雪上加霜：
+            · 耗时 2ms  → 排 14ms → 周期 16ms（60fps，跟旧版一样）；
+            · 耗时 33ms → 排 1ms  → 周期 34ms（≈29fps，比旧版 20fps 快 45%）；
+          而且 `ANIM_SLACK_MS` 保证每帧之间**一定**回到事件循环一次
+          （鼠标移动 / `<Enter>/<Leave>` 不会整段被排到动画后面）。
+        """
+        if self._anim_after is not None:
+            return
+        delay = ANIM_FRAME_MS
+        if frame_ms is not None:
+            delay = max(ANIM_SLACK_MS,
+                        int(round(ANIM_FRAME_MS - float(frame_ms))))
+        try:
+            self._anim_after = self.root.after(delay, self._anim_tick)
+        except Exception:
+            self._anim_after = None
 
     def _anim_stop(self):
         if self._anim_after is not None:
@@ -1523,6 +1558,7 @@ class Companion:
     def _anim_tick(self):
         self._anim_after = None
         try:
+            t0 = time.perf_counter()
             now = time.time()
             alive = {}
             for chan, a in self._anims.items():
@@ -1534,8 +1570,10 @@ class Companion:
                     alive[chan] = a
             self._anims = alive
             self._redraw()
+            #  ★ 把这一帧的实测耗时交给 `_anim_kick` —— 决定下一帧等多久（别把循环排满）
+            spent = (time.perf_counter() - t0) * 1000.0
             if self._anims:
-                self._anim_kick()
+                self._anim_kick(spent)
         except Exception as e:
             self._anims = {}
             print(f"[ui] 动画异常 {e}", flush=True)
@@ -2961,7 +2999,7 @@ class Companion:
                     self._set_shown(False)
         except Exception:
             pass
-        self.root.after(33, self._follow_fast)
+        self.root.after(FOLLOW_FAST_MS, self._follow_fast)
 
     def _cycle_corner(self):
         """右上 → 右下 → 左下 → 左上 循环停靠角（默认从**右下**出发）。

@@ -526,6 +526,13 @@ def aa_mask(w, h, r):
 
 _GRAD_CACHE = {}
 _RAMP_CACHE = {}
+#   投影层缓存（第二十七批）。键 = 形状 (w,h,r,s) —— 投影**只跟形状有关**，
+#   与进度/文字/头像/悬停无关，所以稳态下每帧都是命中（省掉整块高斯模糊）。
+_SHADOW_CACHE = {}
+#   形状"装饰"遮罩缓存（第二十七批）：(暗发丝线, 亮发丝线, 内壁高光)，键 = 几何。
+_EDGE_CACHE = {}
+#   形状本体结果缓存（第二十七批）：键 = (几何, hover)。**容量故意很小**，见 `_body`。
+_BODY_CACHE = {}
 
 
 def _vgrad(w, h, top, bot):
@@ -568,26 +575,83 @@ def _vramp(w, h, lo, hi, p0=0.0, p1=1.0, gamma=1.0):
     """竖直 alpha 渐变 `L` 图：`p0` 处是 `lo`，线性到 `p1` 处的 `hi`，两端外取端点值。
 
     用来做"发丝线只在顶部亮"这种**沿高度调制的遮罩**（缓存，键里带参数）。
+
+    ★★ 第二十七批（性能）：**键里不再带 `w`**，缓存的是 `(1, h)` 那一列，
+      横向展开每帧现做（`NEAREST` 广播，纯复制，μs 级）。
+      为什么原来是个浪费：这是个**竖直**渐变，每一条水平线上的值都一样 ——
+      宽度根本不改变内容。带着 `w` 进键的后果是"形变动画里每换一帧宽度，
+      这列就重跑一遍 Python 循环"（h=280 次迭代）× 4 个调用点/帧。
+      改完像素完全一致（`NEAREST` 从 1 宽展开就是逐列复制）。
     """
-    key = (w, h, lo, hi, round(p0, 3), round(p1, 3), round(gamma, 3))
-    g = _RAMP_CACHE.get(key)
-    if g is None:
-        one = Image.new("L", (1, h), 0)
-        px = one.load()
+    key = (h, lo, hi, round(p0, 3), round(p1, 3), round(gamma, 3))
+    col = _RAMP_CACHE.get(key)
+    if col is None:
+        col = Image.new("L", (1, h), 0)
+        px = col.load()
         span = max(1e-6, p1 - p0)
         for y in range(h):
             t = (y / max(1, h - 1) - p0) / span
             t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
             px[0, y] = max(0, min(255, int(round(lo + (hi - lo) * (t ** gamma)))))
-        g = one.resize((w, h), Image.NEAREST)
         if len(_RAMP_CACHE) > 48:
             _RAMP_CACHE.clear()
-        _RAMP_CACHE[key] = g
-    return g
+        _RAMP_CACHE[key] = col
+    #   ★ 缓存里那列是**只读母版**：展开出一张新的交出去（调用方只读，但别漏出去暴露）。
+    return col if w == 1 else col.resize((int(w), h), Image.NEAREST)
+
+
+def _edge_masks(w, h, r, s):
+    """形状的**三张"装饰"遮罩**：`(暗发丝线, 亮发丝线, 内壁高光)`，原点在 `(0,0)`。
+
+    ★★ 第二十七批（性能）：这三张**只跟几何 `(w,h,r,s)` 有关** ——
+      跟进度、文字、头像、悬停颜色全无关，而旧版**每建一帧都重算一遍**。
+      在 125% 屏的胶囊上那是 4× 画布（1190×280）上的
+      一个圆角矩形描边 + 两次 `NEAREST` 展开 + 三次 `multiply` + 一次 `paste`，
+      合计约 8ms/帧 —— 而"正在跑"时头像 12.5 次/秒、进度每秒变几次，
+      **每一帧都在重复算一模一样的东西**。
+      ⇒ 缓存后稳态是 0；形变动画里宽度在变，该重建就重建（不白占）。
+
+    ★ 缓存里的是**只读母版**：三个调用点都只把它当 `paste` 的 `mask` 参数（只读），
+      别在上面就地画东西。
+
+    ★ 为什么把"发丝线"和"内壁高光"放一个函数、共用一个缓存：
+      它们读的是同一组几何量（`r`、`s`、`SS`）。分成两处各算一次
+      = 同一份取舍写两遍，早晚会漂（本项目在 `ui_layout` 上已经栽过两次）。
+    """
+    key = (w, h, round(r, 3), round(s, 3))
+    got = _EDGE_CACHE.get(key)
+    if got is None:
+        # —— 外圈 1px "上亮下暗"发丝线（在深底/中底/浅底上都能把形状定住）——
+        ring = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(ring).rounded_rectangle(
+            [0, 0, w - 1, h - 1], max(0, int(round(r * SS))),
+            outline=255, width=max(1, int(round(s * SS))))
+        #  底：暗线（下半更重，模拟"背光面"）
+        dark = ImageChops.multiply(ring, _vramp(w, h, EDGE_A, int(EDGE_A * 0.45),
+                                                0.0, 1.0, 1.0))
+        #  顶：亮线（只在上半，幂次衰减）
+        light = ImageChops.multiply(ring, _vramp(w, h, HAIR_A, 0, 0.0, 0.55, 1.35))
+        # —— 内壁高光：只沿顶部一圈，往下渐隐（交代受光方向 = "材质感" 的来源）——
+        in_ = max(1, int(round(s * SS)))
+        rim = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(rim).rounded_rectangle(
+            [in_, in_, w - in_ - 1, h - in_ - 1],
+            max(0, int(round((r - s) * SS))), outline=255, width=in_)
+        ramp = Image.new("L", (1, h), 0)
+        rp = ramp.load()
+        span = max(1.0, h * 0.60)
+        for y in range(h):
+            rp[0, y] = int(round(RIM_A * max(0.0, 1.0 - y / span) ** 1.5))
+        rim = ImageChops.multiply(rim, ramp.resize((w, h), Image.BILINEAR))
+        got = (dark, light, rim)
+        if len(_EDGE_CACHE) > 6:
+            _EDGE_CACHE.clear()
+        _EDGE_CACHE[key] = got
+    return got
 
 
 def _hairline(body, x0, y0, x1, y1, r, s):
-    """画**"上亮下暗"的 1px 外圈** —— 这是"控件在任意背景上都不消失"的关键。
+    """把**"上亮下暗"的 1px 外圈**就地贴到 `body` 的 `(x0,y0)` 处。
 
     ★ 为什么必须双色（本次改版踩的最大的一个坑）：
       旧版外圈只有一层黑边。在深色底（剪映暗色 UI / 暗壁纸）上，黑边**等于没画**，
@@ -597,25 +661,47 @@ def _hairline(body, x0, y0, x1, y1, r, s):
       改成双色环之后：深底靠上半圈的亮线分离、浅底靠下半圈的暗线分离。
     ★ 也不能是"一整圈均匀亮线" —— 那正是旧版"剪贴画感"的来源。
       所以亮线只走 y ∈ [0, 55%]，往下幂次衰减到 0；暗线从 45% 起渐入。
+    ★★ 遮罩本身走 `_edge_masks` 缓存（第二十七批）——**先贴暗线、再贴亮线**的顺序
+      不能反：亮线是 `(255,255,255)`，反过来的话暗线会把亮线的上半圈压灰。
     """
-    w = x1 - x0 + 1
-    h = y1 - y0 + 1
-    ring = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(ring).rounded_rectangle(
-        [0, 0, w - 1, h - 1], max(0, int(round(r * SS))),
-        outline=255, width=max(1, int(round(s * SS))))
-
-    # 底：暗线（下半更重，模拟"背光面"）
-    dark = ImageChops.multiply(ring, _vramp(w, h, EDGE_A, int(EDGE_A * 0.45),
-                                            0.0, 1.0, 1.0))
+    dark, light = _edge_masks(x1 - x0 + 1, y1 - y0 + 1, r, s)[:2]
     body.paste((0, 0, 0), (x0, y0), dark)
-    # 顶：亮线（只在上半，幂次衰减）
-    light = ImageChops.multiply(ring, _vramp(w, h, HAIR_A, 0, 0.0, 0.55, 1.35))
     body.paste((255, 255, 255), (x0, y0), light)
 
 
 def _body(w, h, r, hover=0.0, s=1.0, pad=0):
-    """形状本体。返回 **(RGB 画布, 形状遮罩 L)**，形状画在 `(pad*SS, pad*SS)`。
+    """形状本体 `(RGB 画布, 形状遮罩 L)`。**带结果缓存**，交出去的是**副本**。
+
+    ★★ 第二十七批（性能）：这一层比"三张遮罩"更值得缓存 —— 实测在 125% 屏的胶囊上
+      光**三张遮罩的 `paste`** 就要 ~10ms/帧（黑发丝线 3.6 + 亮发丝线 3.3 + 内壁高光 3.1，
+      每个都是整张 1192×280 画布的带遮罩 `paste`）。而它们的结果
+      **只跟 `(几何, hover)` 有关** —— 跟进度、文字、头像都无关。
+      正在跑的时候头像 12.5 次/秒、进度每秒变几次、底部进度条每秒变几次，
+      每一帧都在把同一圈线重新贴一遍。
+      ⇒ 稳态（几何不变）直接从 ~11.8ms 掉到 ~0.2ms（只付一次 `cv.copy()`）。
+
+    ★ 为什么必须交**副本**：`_render` 拿到 `cv` 之后会往上画进度环/进度条/文字/头像
+      （`ImageDraw.Draw(cv, "RGBA")`）—— 直接把缓存对象交出去等于把缓存毁掉。
+      `mask` 不用副本：调用方只读（`Image.merge` 会自己拷一份）。
+
+    ★ 容量故意很小（4）：稳态真正用到的只有**当前这一种几何**，
+      留几个位置给"球↔胶囊"切换和悬停中间的几档就够了。
+      形变动画里宽度每帧都变 ⇒ 必然miss ⇒ 不产生任何额外负担（也不会把内存撑起来）。
+    """
+    key = (round(w, 2), round(h, 2), round(r, 2),
+           round(max(0.0, min(1.0, float(hover))), 3), round(s, 3), round(pad, 3))
+    got = _BODY_CACHE.get(key)
+    if got is None:
+        got = _build_body(w, h, r, hover, s, pad)
+        if len(_BODY_CACHE) > 4:
+            _BODY_CACHE.clear()
+        _BODY_CACHE[key] = got
+    cv, mask = got
+    return cv.copy(), mask
+
+
+def _build_body(w, h, r, hover=0.0, s=1.0, pad=0):
+    """形状本体的**唯一构造点**（`_body` 负责缓存，这里只管画）。
 
     ★ 底必须是 **RGB**：只有 RGB 底上的 `ImageDraw` 才会真的做 alpha 混合
       （RGBA 底是"替换"，半透明填充会变成挖洞 —— 见文件头的坑 1）。
@@ -632,20 +718,12 @@ def _body(w, h, r, hover=0.0, s=1.0, pad=0):
     _hairline(body, 0, 0, w2 - 1, h2 - 1, r, s)
 
     # 内壁高光：只沿顶部一圈，往下渐隐（交代受光方向 = "材质感" 的来源）
-    in_ = max(1, int(round(s * SS)))
-    rim = Image.new("L", (w2, h2), 0)
-    ImageDraw.Draw(rim).rounded_rectangle(
-        [in_, in_, w2 - in_ - 1, h2 - in_ - 1],
-        max(0, int(round((r - s) * SS))), outline=255, width=in_)
-    ramp = Image.new("L", (1, h2), 0)
-    rp = ramp.load()
-    span = max(1.0, h2 * 0.60)
-    for y in range(h2):
-        rp[0, y] = int(round(RIM_A * max(0.0, 1.0 - y / span) ** 1.5))
-    rim = ImageChops.multiply(rim, ramp.resize((w2, h2), Image.BILINEAR))
-    body.paste((255, 255, 255), (0, 0), rim)
+    #   ★ 遮罩走 `_edge_masks` 缓存 —— 与上面那条发丝线**同一组几何量、同一个出口**
+    #     （第二十七批：它原来在这里另算一份，跟 `_hairline` 里那份是同一组取舍写两遍）。
+    body.paste((255, 255, 255), (0, 0), _edge_masks(w2, h2, r, s)[2])
 
-    # 摆到带投影留白的大画布上（形状外的 RGB 是垃圾，最后会被遮罩裁掉）
+    # 摆到带投影留白的大画布上（形状外的 RGB 是垃圾 —— 但**不影响结果**：
+    #   `_masked_1x` 的 RGBA 降采样是按 alpha 加权的，形状外权重为 0，见那里）
     cv = Image.new("RGB", (W, H), SURF_BOT)
     cv.paste(body, (p, p))
     mask = Image.new("L", (W, H), 0)
@@ -1087,7 +1165,10 @@ def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
     sz = dict(zip(("ball", "pct", "disc", "title", "sub"), szs))
     P = pad_for(s)
     ox = oy = P * SS
-    w2, h2 = int(round(w * SS)), int(round(h * SS))
+    #   ★ 这里只需要 h2：球心/进度环/进度条全按"形状高度"定位（球态高宽相等）。
+    #     形状宽度 `w2` 只有 `_body` / `_shadow` 自己需要 —— 第二十七批把影子挪进
+    #     `_shadow` 之后这里就多了一个没人读的局部量（pyflakes 会报）。
+    h2 = int(round(h * SS))
     cv, mask = _body(w, h, r, hover=hover, s=s, pad=P)
     d = ImageDraw.Draw(cv, "RGBA")          # ★ RGB 底 → 混合是真的
 
@@ -1159,24 +1240,84 @@ def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
                     d.rounded_rectangle([x0, by, x0 + fw, by + bh], bh // 2,
                                         fill=_fade(_rgba(accent(kind)), pill_a))
 
-    # ——— 贴遮罩成 RGBA → 缩回 1x（唯一一次降采样）→ 垫投影 ———
+    # ——— 贴遮罩 → 缩回 1x（唯一一次降采样）→ 垫投影 ———
     W, H = int(round(w + 2 * P)), int(round(h + 2 * P))
-    out = _to_rgba(cv, mask).resize((W, H), Image.BOX)
-    sm = _mask(w2, h2, r * SS).filter(ImageFilter.GaussianBlur(SHADOW_BLUR * s * SS * 0.5))
-    sm = sm.resize((int(round(w)), int(round(h))), Image.BOX)
-    shadow = Image.new("L", (W, H), 0)
-    shadow.paste(sm, (P, P + int(round(SHADOW_DY * s))))
-    sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    # ★★ 投影尾巴**硬截断到 0**（第二十四批）。为什么不能靠"留白够大"了事：
-    #   α 一旦落在 1~2/255 这个量级，人眼看不出、但 Windows 的分层窗口命中测试
-    #   照样把它算成"不透明"→ 白吃一圈鼠标。归零之后：
-    #     ① 视觉上没有任何损失（2/255 不可见）；
-    #     ② 吃点击的环**收窄**到"α ≥ 2 的那一圈"（实测约 9px，比旧版 7px 时代还紧）；
-    #     ③ 窗口边界不再硬切投影（旧版边界上还留着 α≈9 的灰，屏幕上就是一圈脏边）。
-    lut = [0 if int(v * SHADOW_ALPHA / 255) < 2 else int(v * SHADOW_ALPHA / 255)
-           for v in range(256)]
-    sh.putalpha(shadow.point(lut))
+    out = _masked_1x(cv, mask, W, H)
+    sh = _shadow(w, h, r, s, P, W, H)
     return Image.alpha_composite(sh, out)
+
+
+def _masked_1x(cv, mask, W, H):
+    """4x 画布 + 4x 遮罩 → **1x RGBA**（alpha = 覆盖率，RGB 保持**直通**不上乘）。
+
+    ★★ 第二十七批（性能）：原来这条路是"先在 4x 上贴成一张 4x RGBA，再整体 BOX 缩到 1x"
+      （`_to_rgba(cv, mask).resize(...)`）。在用户那块 125% 屏上，
+      那是一次 **1214×304 的 RGBA 分配 + `convert("RGBA")` + 带遮罩 `paste`**，
+      全都在 369k 像素上做，而产物**下一行就被 resize 扔掉 15/16**（实测 ~6.7ms/帧）。
+      现在只留最后那次**必须**的 RGBA 降采样，前面那两下全尺寸 4 通道操作换成一个
+      `merge`（`cv` 已经是 RGB，补一条 alpha 通道即可）。实测 6.7ms → 1.6ms。
+
+    ★★★ 为什么**不能**图省事改成"RGB 与遮罩各自缩到 1x、再在 1x 上 `putalpha`"
+      （第一版就这么写的，被 `_probe_render_layers.py` 当场抓住）：
+      **PIL 的 RGBA 降采样是按 alpha 加权平均的，输出的是直通色** ——
+      实测形状边缘一个 4x4 块（4 个在形状内、12 个在外）出来是
+      `(121,121,124, alpha=80)`：RGB 仍是球体本色 121，**不是** 121×5/16=38。
+      而"RGB 单独缩"是逐通道独立平均，会给出 38 —— 也就是**提前预乘了一次**，
+      上屏前 `premultiplied_bytes` 再乘一次 ⇒ **边缘整体变暗**（100 个像素、
+      最大差 211）。所以 `mask` 只能当**第 4 条通道**跟着一起缩。
+      ⇒ 推论：`mask` 必须**二值**（`_mask` 是 `fill=255` 的圆角矩形，正是二值）；
+      若哪天给遮罩加了抗锯齿，这条加权的语义就会变。
+
+    ★ 顺带修正一句旧注释：`_to_rgba` 里写的"形状外必须是全零，降采样才是正确预乘"
+      描述的是**另一个**机制。真实机制是"按 alpha 加权"——形状外权重为 0，
+      它的 RGB 是什么**无所谓**（所以这里可以直接 `merge` 出 `cv` 的原始外圈）。
+      保留 `_to_rgba` 不动（卡片那条路还在用它），只是不再拿它当这一层的必经之路。
+    """
+    return Image.merge("RGBA", cv.split() + (mask,)).resize((W, H), Image.BOX)
+
+
+def _shadow(w, h, r, s, P, W, H):
+    """这张形状的**投影层**（1x 全零 RGBA，只有 alpha）。**按形状缓存**。
+
+    ★★ 第二十七批（性能）：**只做了缓存，没动算法** —— 这一步是**逐位不变**的。
+      旧法每建一帧都重算一遍 4x 遮罩 + 4x 高斯模糊（半径 18，即在 1190×280 上做
+      三次可分离方框卷积，125% 屏的胶囊实测 6.2ms），而投影**只跟形状 `(w,h,r,s)` 有关** ——
+      跟进度、文字、头像、悬停颜色全无关。正在跑的时候头像 12.5 次/秒、进度每秒变几次，
+      每一帧都在算同一个影子。
+
+    ★ 为什么**没有**顺手把模糊从 4x 挪到 1x（试过，能再省 5ms 左右，被否）：
+      `_probe_render_layers.py` 扫了 4x / 2x / 1x 三档 ——
+      2x 的最大 alpha 偏差 4、1x 是 8（而 `ImageFilter.GaussianBlur` 的方框尺寸
+      是**按半径取整**的，所以"先模糊再降采样"和"先降采样再模糊"并不严格可交换，
+      半径越小这一误差越大）。投影峰值 alpha 才 112，8 级 ≈ 3%，
+      肉眼基本看不出 —— 但这一批已经能整体做到**零像素改动**，
+      为 6ms（且只在形变动画的十几帧上）去动一处用户盯着看的质感，不划算。
+      要动它就得连 `_probe_render_golden.py` 的判据一起放宽，那等于把
+      "这批改了哪些像素"这件事从**可证明**降级成**可解释**。不值。
+    """
+    key = (round(w, 2), round(h, 2), round(r, 2), round(s, 3))
+    got = _SHADOW_CACHE.get(key)
+    if got is None:
+        w2, h2 = int(round(w * SS)), int(round(h * SS))
+        m = _mask(w2, h2, r * SS).filter(
+            ImageFilter.GaussianBlur(SHADOW_BLUR * s * SS * 0.5))
+        m = m.resize((int(round(w)), int(round(h))), Image.BOX)
+        layer = Image.new("L", (W, H), 0)
+        layer.paste(m, (P, P + int(round(SHADOW_DY * s))))
+        #   ★★ 投影尾巴**硬截断到 0**（第二十四批）。为什么不能靠"留白够大"了事：
+        #     α 一旦落在 1~2/255 这个量级，人眼看不出、但 Windows 的分层窗口命中测试
+        #     照样把它算成"不透明"→ 白吃一圈鼠标。归零之后：
+        #       ① 视觉上没有任何损失（2/255 不可见）；
+        #       ② 吃点击的环**收窄**到"α ≥ 2 的那一圈"（实测约 9px，比旧版 7px 时代还紧）；
+        #       ③ 窗口边界不再硬切投影（旧版边界上还留着 α≈9 的灰，屏幕上就是一圈脏边）。
+        lut = [0 if int(v * SHADOW_ALPHA / 255) < 2
+               else int(v * SHADOW_ALPHA / 255) for v in range(256)]
+        got = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        got.putalpha(layer.point(lut))
+        if len(_SHADOW_CACHE) > 48:
+            _SHADOW_CACHE.clear()
+        _SHADOW_CACHE[key] = got
+    return got
 
 
 def card_buttons(w, h, r, scale=1.0, n=2):

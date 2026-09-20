@@ -457,14 +457,24 @@ def main():
                  # ★★ 第二十五批（球心动图："没运行时就不动，正在运行时就动"）
                  #   判据 / 帧号来源 / 时钟推进 / 三个状态位
                  "is_working", "_avatar_frame", "_tick_avatar",
-                 "_working", "_work_t0", "_avatar_idx"]
+                 "_working", "_work_t0", "_avatar_idx",
+                 # ★★ 第二十七批（"总觉得卡卡的" · 运行时性能）
+                 #   `_anim_kick` 是"按**周期**倒推间隔"的唯一落点：少了它 /
+                 #   退回无条件 `after(ANIM_FRAME_MS)`，重帧的帧周期就从
+                 #   ~34ms 退回 ~49ms（20fps），而屏幕上只是"有点顿"，不报错。
+                 "_anim_kick", "ANIM_SLACK_MS", "FOLLOW_FAST_MS"]
         gmiss = [n for n in gmust if n not in gnames]
         #   ★★ 第二十六批：**值**核验（不是名字）—— 这一批的可见改动就是"球变大"，
         #     而 `BASE_H` 这个名字从第一版起就没变过，光看名字永远核不出来。
         #     做法见 `剪映伴侣.py` 里那段注释：把原来的元组赋值拆成三行，
         #     否则 `module_consts` 的 "LOAD_CONST 紧跟 STORE_NAME" 根本配不上。
         gmc = module_consts(gco)
-        gvals = {"BASE_H": 56, "BASE_R": 16, "BASE_W": 238}
+        gvals = {"BASE_H": 56, "BASE_R": 16, "BASE_W": 238,
+                 # ★★ 第二十七批：节拍这三个数是这一批的**全部可见改动**，
+                 #   而名字从第一版起就没变过（`ANIM_FRAME_MS` 一直是 16）——
+                 #   光看名字永远核不出"节拍到底有没有改成自适应"。
+                 #   注意 `ANIM_FRAME_MS` 的含义也变了：从"再等多久"变成"周期"。
+                 "ANIM_FRAME_MS": 16, "ANIM_SLACK_MS": 1, "FOLLOW_FAST_MS": 16}
         gbad = []
         for k, want in gvals.items():
             got = gmc.get(k, "<缺>")
@@ -543,7 +553,14 @@ def main():
                  #   少一个的后果都是静默的：判据没了 → 线稿被当照片贴成黑圆；
                  #   `avatar_kind` 没了 → 探针/测试没法查"这张素材走的哪条路"。
                  "classify_avatar", "_to_ink_mask", "avatar_kind",
-                 "AVATAR_INK", "AVATAR_PHOTO", "AVATAR_INK_RGB"]
+                 "AVATAR_INK", "AVATAR_PHOTO", "AVATAR_INK_RGB",
+                 # ★★ 第二十七批（"总觉得卡卡的" · 运行时性能）
+                 #   这一批**只加缓存、不改算法** ⇒ 屏幕上"看起来毫无变化"，
+                 #   所以只能靠"缓存到底在不在"来证明改动真进了包。
+                 #   少任意一个 ⇒ 那一层每帧重算（稳态 26.3ms → 又回到卡）。
+                 "_masked_1x", "_shadow", "_edge_masks", "_build_body",
+                 "_hairline", "_body",
+                 "_RAMP_CACHE", "_SHADOW_CACHE", "_EDGE_CACHE", "_BODY_CACHE"]
         umiss = [n for n in umust if n not in ur_names]
         mc = module_consts(ur_co)
         #   ★ 值核验（不是名字）：这一批修的就是这几个数，被改回旧值就等于没修。

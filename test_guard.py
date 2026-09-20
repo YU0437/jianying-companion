@@ -1403,7 +1403,67 @@ check("⑥-5 ★★ `_redraw` 里不再**重建**任何画布元素（每帧重�
 check("⑥-6 形态补间是**分通道**的（否则每秒一次的进度更新会把形变动画反复掐断）",
       "def _anim_begin(self, chan" in _inspect.getsource(gui.Companion._anim_begin), True)
 check("⑥-7 分通道后仍只有一个 tick 循环（不许每个通道各排一个 after）",
-      _inspect.getsource(gui.Companion).count("after(ANIM_FRAME_MS"), 1)
+      _inspect.getsource(gui.Companion).count("self._anim_tick)"), 1)
+
+
+# ---- ⑥d 动画节拍自适应（第二十七批 · 「总觉得卡卡的」的根因之一）----
+#   原来无条件 `after(16)`。但 `after(ms)` 的语义是「**回调返回之后**再过 ms」，
+#   真实**周期** = 渲染耗时 + ms。形变放宽那几帧要 ~33ms 才画得完 ⇒ 周期 49ms（20fps）。
+#   现在按周期倒推间隔：`ms = max(ANIM_SLACK_MS, ANIM_FRAME_MS - 耗时)`，
+#   顺带保证每帧之间一定回一次事件循环（鼠标不被动画整段堵住）。
+#   ★★ 这里特意把断言写成「周期」（耗时 + 排期），不是「排期」——
+#      写错成 `max(ANIM_FRAME_MS, 耗时 + 余量)` 时排期反而变大，只测排期会漏掉。
+class _FakeRoot:
+    def __init__(self):
+        self.delays = []
+
+    def after(self, ms, fn):
+        self.delays.append(ms)
+        return "after-id"
+
+    def after_cancel(self, i):
+        pass
+
+
+def _kick_call(frame_ms, already=None):
+    """用假 root 跑一次 `_anim_kick`，看它排了多久。
+
+    ★ 桩上必须**同时**挂 `root` 和 `_anim_tick`：`_anim_kick` 里是
+      `self.root.after(delay, self._anim_tick)`，少了后者会抛 AttributeError，
+      而它被 `except Exception` 吞掉 —— 结果就是"什么都没排"（静默假绿）。
+    """
+    stub = type("S", (), {})()
+    stub.root = _FakeRoot()
+    stub._anim_after = already
+    stub._anim_tick = lambda: None
+    gui.Companion._anim_kick(stub, frame_ms)
+    return stub.root.delays
+
+
+check("⑥d-1 ★★ 轻帧（2ms）的**周期**必须是满帧率：排期 + 耗时 == ANIM_FRAME_MS（60fps）",
+      2 + _kick_call(2.0)[0], gui.ANIM_FRAME_MS)
+check("⑥d-2 ★★ 重帧（40ms）**不许**再叠一个满帧间隔 —— 排期只留 ANIM_SLACK_MS"
+      "（周期 41ms；旧写法 `after(16)` 是 56ms ≈ 18fps，比不改还慢）",
+      _kick_call(40.0), [gui.ANIM_SLACK_MS])
+check("⑥d-3 首帧（还没测过耗时）走满帧率", _kick_call(None), [gui.ANIM_FRAME_MS])
+check("⑥d-4 ★ 已经排了下一帧就不重复排（`_anim_after` 是唯一令牌，重复排会让动画翻倍速）",
+      _kick_call(40.0, already="busy"), [])
+check("⑥d-5 ★ `_anim_tick` 必须把**实测耗时**交给 `_anim_kick`"
+      "（不传就等于回到「无条件 16ms」的老毛病）",
+      "_anim_kick(spent)" in _inspect.getsource(gui.Companion._anim_tick), True)
+check("⑥d-6 ★★ 周期单调：排期绝不能**大于** ANIM_FRAME_MS（一拍比 60fps 还慢就是写反了）",
+      all(_kick_call(f)[0] <= gui.ANIM_FRAME_MS for f in (0.0, 2.0, 15.0, 33.0, 40.0)), True)
+
+
+# ---- ⑥e 跟随循环节拍（第二十七批：33 → 16，拖动时球不慢半拍）----
+check("⑥e-1 跟随循环 ≥ 60Hz（`_poll_hover` + `_float_position` 一 tick 实测 ~19μs，"
+      "提到 60Hz 的成本可以忽略，但拖动剪映的跟随手感差一倍）",
+      gui.FOLLOW_FAST_MS <= 20, True)
+check("⑥e-2 ★ 跟随循环的间隔必须是**常量**，不许写死字面量"
+      "（改一处即可；写死的数字在测试里看不见）",
+      "after(FOLLOW_FAST_MS" in _inspect.getsource(gui.Companion._follow_fast), True)
+check("⑥e-3 只有「首次启动」和「循环自排」两处给 `_follow_fast` 排期，多一处就是循环翻倍",
+      _inspect.getsource(gui.Companion).count("self._follow_fast)"), 2)
 
 # ---- ⑥a 启动首帧（第二十三批 · 真踩到的一个"球是空的"）----
 #   `__init__` 里 `_build_ui()` 排在"解析顶层 HWND"**之前**，那一刻 `my_hwnd is None`
