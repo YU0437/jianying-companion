@@ -297,4 +297,7 @@ ui 设计可以抄一下 iPhone」「点击后要先问一下用户是否准备�
 
 - `version_info.txt` 里的 `FileVersion` / `ProductVersion` 必须和安装包文件名一致
 - 每次发版：四套测试全绿 → `py_verify`（`_verify_exe.py`）→ 打 exe → 出安装包 →
-  在 [Releases](../../releases) 里附上 `剪映伴侣-Setup-x.y.z.exe`
+  推代码 → 在 [Releases](../../releases) 里附上 `剪映伴侣-Setup-x.y.z.exe`
+- 推代码本机要 `git -c http.sslVerify=false push origin main`（本机查不了
+  GitHub 证书链的吊销状态，不关必失败）；发 Release 用 `python _release.py vX.Y.Z <exe>`
+  （本机没有 `gh`，脚本自己走 REST，正文直接取本文件里 `## [X.Y.Z]` 那一段）
