@@ -2840,6 +2840,215 @@ check(f"㉳-15 ★ `ring_inset` 单一来源：`ui_metrics()` 与 `_ur.default_l
        and 'inset = float(lay["ring_inset"])' in _inspect.getsource(_ur._render)), True)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ㉴ 第二十五批：球心换成动图（用户："把剪的图片换成这个，
+#   没运行时就不动，正在运行时就动"）
+# ══════════════════════════════════════════════════════════════════════
+# 这一组的立意：**"动不动"是个可以离线钉死的事实**，不该只活在肉眼观察里。
+# 三条最关键：
+#   ① 判据 `is_working` 的取值表 —— 它决定"哪些状态算在跑"（全项目最容易被改错的一处：
+#      `kind="busy"` 有 25 个调用点，其中一半是"开关已切"的通知，那些**不该**跳舞）；
+#   ② 跑起来时进度环**一个像素都没被挡**（小人 40px 会把 48px 球里的环整个盖掉 ——
+#      这不是"不好看"，是"看不到进度"，必须由测试兜着）；
+#   ③ 帧号进了缓存键（不然 23 帧全命中同一张图，屏上永远一个定格）。
+_ur._AV = None
+_ur._AV_DISC.clear()
+_ur._CACHE.clear()
+
+# ㉴-1 `is_working` 取值表。
+#   hold=0 → 真在跑；hold>0 → 只是一条会自己收回的通知。
+_wtab = [(("busy", 0), True), (("busy", 5), False), (("busy", 10), False),
+         (("idle", 0), False), (("ok", 0), False), (("err", 0), False),
+         (("ask", 0), False)]
+check(f"㉴-1 ★★ 「正在运行」判据 `is_working(kind, hold)`（busy+hold=0 才算在跑）"
+      f"  [{[gui.is_working(k, h) for k, h in (t[0] for t in _wtab)]}]",
+      [gui.is_working(k, h) for (k, h) in (t[0] for t in _wtab)],
+      [t[1] for t in _wtab])
+#   ★ 反向：源码里不许出现"用 pct / _cancel 当判据"的旧写法（那两个都试过、都不行，
+#     理由写在 `is_working` 的 docstring 里）。只查函数体（去掉 docstring）。
+_wiw = code_of(gui.is_working)
+check("㉴-2 ★ 判据**只**看 hold，不许回退成 `pct is not None` /"
+      " `_cancel is not None`（后者漏掉 取文件/体检/守望 三条路）",
+      ("pct" not in _wiw and "_cancel" not in _wiw), True)
+
+# ㉴-3 素材真的在仓库里（源码运行时也得有；打包那条由 `_verify_exe` 查 toc）。
+check("㉴-3 ★ 动图素材 `ball_avatar.gif` 在项目里，且 `avatar_path()` 指得到",
+      ((HERE / "ball_avatar.gif").exists() and _ur.avatar_path().exists()
+       and _ur.avatar_path().name == "ball_avatar.gif"
+       and _ur.res_dir() == HERE), True)
+# ㉴-4 打包清单带上了它（datas 漏带 = 球心永远是个剪字，且**不报错**）。
+_spec_txt = (HERE / "JianyingCompanion.spec").read_text(encoding="utf-8")
+check("㉴-4 ★★ spec 的 `datas` 把动图打进包（漏带不报错，只是球心永远是个剪字）",
+      (("ball_avatar.gif" in _spec_txt) and ("datas=[(" in _spec_txt)), True)
+
+# ㉴-5 时间轴按 GIF **自己的**逐帧时长建（不是硬编码 100ms）。
+_nfr = _ur.avatar_count()
+check(f"㉴-5 帧数与时间轴  [帧数 {_nfr}]", (_nfr >= 2
+      and _ur.avatar_index_at(0) == 0 and _ur.avatar_index_at(99) == 0
+      and _ur.avatar_index_at(100) == 1 and _ur.avatar_index_at(2300) == 0), True)
+check("㉴-6 ★ 帧号**进缓存键**：换一帧就必须换一张图（不然屏上一个定格）",
+      (len({hash(_ur.render(48, 48, 24, scale=1.0, kind="idle", glyph="",
+                            ball_a=1.0, pill_a=0.0, avatar=i).tobytes())
+            for i in range(_nfr)}) == _nfr), True)
+
+# ㉴-7 头像直径：待机填满球心、跑起来缩进环内。
+_ri = _ur.default_layout(1.0)["ring_inset"]
+_d_idle = _ur.avatar_d(48, _ri, ring=False)
+_d_ring = _ur.avatar_d(48, _ri, ring=True)
+_ring_in = 48 / 2.0 - _ri - 1.25          # 环内沿半径
+check(f"㉴-7 ★★ 跑起来时头像直径缩到**环内沿以内**（否则 40px 会把 48px 球里的"
+      f" 进度环整个盖住 → 看不到进度）  [待机 {_d_idle} / 环 {_d_ring} vs 内沿 {_ring_in * 2:.1f}]",
+      (_d_idle > _ring_in * 2 and _d_ring < _ring_in * 2
+       and abs(_d_idle - (48 - 2 * _ur.AVATAR_INSET)) < 1e-6), True)
+
+# ㉴-8 ★★ 跑起来时**进度环一个像素都没被挡**（直接对像素断言，不看截图）。
+def _shot(**kw):
+    kw.setdefault("glyph", "")
+    return _ur.render(48, 48, 24, scale=1.0, ball_a=1.0, pill_a=0.0, **kw)
+
+_noav = _shot(kind="busy", pct=40, glyph="40")
+_av = _shot(kind="busy", pct=40, avatar=3)
+_p1, _p2 = _noav.load(), _av.load()
+_C = 24 + _ur.pad_for(1.0)
+_band = _inner = 0
+for _y in range(_noav.size[1]):
+    for _x in range(_noav.size[0]):
+        _rr = math.hypot(_x - _C, _y - _C)
+        _dd = max(abs(_p1[_x, _y][_i] - _p2[_x, _y][_i]) for _i in range(4))
+        if 15.0 <= _rr <= 19.0:
+            _band = max(_band, _dd)
+        elif _rr <= 11.0:
+            _inner = max(_inner, _dd)
+check(f"㉴-8 ★★ 跑起来时进度环**一个像素都没被挡**（环带逐像素最大差必须是 0）"
+      f"  [环带差 {_band} · 圆心差 {_inner}]",
+      (_band == 0 and _inner > 30), True)
+
+# ㉴-9 待机头像正好 40px（= 球 - 2×4），且整块在球内（不许被球边裁出一圈直边）。
+#   ★ 怎么量出"头像占地"：拿 **同一颗空球**（`glyph=""`、无动图）当底，
+#     逐像素求差 —— 差出来的就**只有**头像，不掺内壁高光/球边那一圈。
+#     （先用"亮度>150"量过一版，被球顶那条 122 的受光边蹭到，量成 40×43 的假红。）
+_blank = _shot(kind="idle")
+_idle_im = _shot(kind="idle", avatar=0)
+_bp, _ip = _blank.load(), _idle_im.load()
+_foot = [(x, y) for y in range(_idle_im.size[1]) for x in range(_idle_im.size[0])
+         if max(abs(_bp[x, y][_i] - _ip[x, y][_i]) for _i in range(4)) > 2]
+_lx = [q[0] for q in _foot]
+_ly = [q[1] for q in _foot]
+check(f"㉴-9 ★ 待机头像直径 = 球-2×{_ur.AVATAR_INSET}（={_d_idle:.0f}px），"
+      f"且不越出球  [占地 {max(_lx) - min(_lx) + 1}×{max(_ly) - min(_ly) + 1}"
+      f" @({min(_lx)},{min(_ly)})]",
+      (max(_lx) - min(_lx) + 1 == int(_d_idle)
+       and max(_ly) - min(_ly) + 1 == int(_d_idle)
+       and min(_lx) == min(_ly) == round(24 + _ur.pad_for(1.0) - _d_idle / 2)), True)
+
+# ㉴-10 兜底：素材不可用时**照旧画字**（球心绝不能是空的）。
+_av_keep = _ur._AV
+_ur._AV = False
+_ur._AV_DISC.clear()
+_ur._CACHE.clear()
+_fb = _shot(kind="idle", glyph="剪", avatar=0)
+_ur._AV = _av_keep
+_ur._AV_DISC.clear()
+_ur._CACHE.clear()
+_fb_a = _fb.getchannel("A")
+check("㉴-10 ★★ 动图取不到时自动**退回画字**（一张素材缺失不许把球心弄空）",
+      (sum(1 for y in range(_fb.size[1]) for x in range(_fb.size[0])
+           if _fb_a.getpixel((x, y)) > 200
+           and sum(_fb.getpixel((x, y))[:3]) / 3.0 > 150) > 30), True)
+
+# ㉴-11 语义层没被动过：`ball_label` 照旧（渲染层只负责"画成小人"）。
+check("㉴-11 ★ 动图只改**外观**，不改状态语义：`ball_label` / `BALL_TEXT` 一个字没动",
+      (gui.ball_label("busy", 87), gui.ball_label("idle", None),
+       tuple(sorted(gui.BALL_TEXT.items()))),
+      ("87", "剪", tuple(sorted({"idle": "剪", "ok": "✓", "err": "×",
+                                 "ask": "!", "busy": "…"}.items()))))
+#   ★ 球心和胶囊图标位必须是**同一张脸**：不然一悬停展开，球上的小人变回剪字。
+check("㉴-12 ★ 球心与胶囊图标位共用同一份帧号（展开/收起不许「同一张脸换脸」）",
+      (_inspect.getsource(_ur._render).count("draw_avatar(") == 2), True)
+
+
+# ── ㉴-13~15：本轮**顺带挖出来**的一个隐形 bug（先于本批就存在）──
+#   `_vgrad` 把**缓存对象本身**交出去，而 `_body` / `_do_card` 直接在它上面
+#   `paste` 白线 —— 同一份渐变被复用几次，那圈白就叠几次（叠到 40 次是纯白 255）。
+#   静态截图看不出来（渲染结果自己有缓存挡着），专挑 pct/hover/动图帧在变的**动态过程**发作。
+#   实测：连渲 40 次球顶从 (121,121,124) 烧到 (254,254,254)。
+_g1 = _ur._vgrad(8, 8, (10, 10, 10), (50, 50, 50))
+_g1.paste((255, 255, 255), (0, 0, 8, 8))            # 模拟调用方的"就地改"
+_g2 = _ur._vgrad(8, 8, (10, 10, 10), (50, 50, 50))
+check("㉴-13 ★★ `_vgrad()` 必须交出**副本**（旧版把缓存对象交出去，调用方一 paste"
+      " 就污染母版 → 那圈亮线越描越白）",
+      (_g2.getpixel((0, 0)) == (10, 10, 10) and _g2.getpixel((0, 7)) == (50, 50, 50)), True)
+
+_b1, _m1 = _ur._body(48, 48, 24, hover=0.0, s=1.0, pad=10)
+_b2, _m2 = _ur._body(48, 48, 24, hover=0.0, s=1.0, pad=10)
+check("㉴-14 ★★ `_body()` 同参数两次必须**逐字节相同**"
+      "（渲染层不许有「越画越亮」这种状态泄漏）",
+      _b1.tobytes() == _b2.tobytes(), True)
+
+_ur._GRAD_CACHE.clear()
+_ur._RAMP_CACHE.clear()
+_ur._CACHE.clear()
+_pk = None
+for _k in range(30):                            # 连压 30 帧（模拟"正在跑"时参数一直在变）
+    _ur._CACHE.clear()
+    _im = _ur.render(48, 48, 24, scale=1.0, kind="busy", glyph="", pct=min(99, _k),
+                     ball_a=1.0, pill_a=0.0)
+    if _pk is None:
+        _pk = _im.getpixel((31, 10))
+_ur._CACHE.clear()
+check(f"㉴-15 ★★ 连压 30 帧后球顶那圈亮线**一点都不漂**（旧版 40 帧烧成纯白）"
+      f"  [首帧 {_pk} → 末帧 {_im.getpixel((31, 10))}]",
+      _im.getpixel((31, 10)) == _pk, True)
+
+
+# ㉴-16 ★★ 按**真实循环节奏**（33ms）跑满一轮：帧号必须是 0..22 再回 0，
+#   不跳帧、不重复、不空转 —— 这一条才真正回答"看上去是在动吗"。
+#   （帧号算对了但采样节奏不对，屏幕上照样是"两帧来回闪"或者"一顿一顿"。）
+_seq, _cur = [], None
+for _t in range(0, 2400, 33):                   # 2.4s ≈ 一轮（23 帧 × 100ms）
+    _i = _ur.avatar_index_at(_t)
+    if _i != _cur:
+        _cur = _i
+    _seq.append(_i)
+_chg = [_seq[0]] + [b for a, b in zip(_seq, _seq[1:]) if a != b]
+check(f"㉴-16 ★★ 33ms 采样跑满一轮 = 0..22 再回 0（不跳帧 / 不重复）"
+      f"  [覆盖 {len(set(_chg))}/{_nfr} 帧]",
+      (_chg == list(range(_nfr)) + [0]
+       and all((b - a) % _nfr == 1 for a, b in zip(_chg, _chg[1:]))), True)
+#   ★ 一轮重画次数 = 帧数 + 1（帧号变了才画），10fps 的图不该按 30fps 重画。
+check(f"㉴-17 ★ 一轮里只重画 {_nfr + 1} 次（= 帧数+1，而不是 33ms 一次共 ~70 次）",
+      (len(_chg), _nfr + 1), (_nfr + 1, _nfr + 1))
+
+
+# ㉴-18 ★ 展开态（横条）的**图标位**也换成同一张小人 —— 逐像素证一遍。
+#   为什么必须证：这条链上"球心"和"图标位"是**两处调用**，
+#   只改一处的后果是"悬停展开时球上的小人变回剪字"（一次形变里换脸）。
+_pl_none = _ur.render(238, 48, 14, scale=1.0, kind="idle", glyph="剪",
+                      title="一键导出", sub="预合成 · 存草稿", ball_a=0.0,
+                      pill_a=1.0, avatar=None)
+_pl_av = _ur.render(238, 48, 14, scale=1.0, kind="idle", glyph="剪",
+                    title="一键导出", sub="预合成 · 存草稿", ball_a=0.0,
+                    pill_a=1.0, avatar=0)
+_pn, _pa = _pl_none.load(), _pl_av.load()
+_i0 = _ur.pad_for(1.0) + _ur.default_layout(1.0)["pad"]
+_idia = _ur.default_layout(1.0)["icon_d"]
+_icx = _i0 + _idia / 2.0
+_icy = _ur.pad_for(1.0) + 48 / 2.0
+_inside = _outside = 0
+for _y in range(_pl_av.size[1]):
+    for _x in range(_pl_av.size[0]):
+        _dd = max(abs(_pn[_x, _y][_i] - _pa[_x, _y][_i]) for _i in range(4))
+        if _dd <= 2:
+            continue
+        if math.hypot(_x - _icx, _y - _icy) <= _idia / 2.0 + 2:
+            _inside += 1
+        else:
+            _outside += 1
+check(f"㉴-18 ★ 展开态图标位也换成小人（差异必须**全部**落在那个 28px 圆盘里）"
+      f"  [盘内 {_inside} 个 / 盘外 {_outside} 个]",
+      (_inside > 60 and _outside == 0), True)
+
+
 print()
 print("失败项:", fails if fails else "无")
 sys.exit(1 if fails else 0)

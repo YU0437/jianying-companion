@@ -5,7 +5,11 @@ a = Analysis(
     ['剪映伴侣.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # ★ 球心动图（第二十五批）必须**跟着打进包**：它没有"退化回字"以外的兜底，
+    #   漏带就是"球心永远是个剪字"。onefile 下会被解到 `sys._MEIPASS`，
+    #   所以取用要走 `ui_render.res_dir()`（**不是** `Path(sys.executable).parent`
+    #   —— 那是安装目录，放的是 使用说明.txt / 运行日志.txt 这类**可写**文件）。
+    datas=[('ball_avatar.gif', '.')],
     hiddenimports=['jy_core'],
     hookspath=[],
     hooksconfig={},

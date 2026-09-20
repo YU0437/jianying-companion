@@ -453,7 +453,11 @@ def main():
                  # ★★ 第二十四批（v1.5.0 质感返工）：DPI 感知 + 缩放合成唯一出口
                  #   —— 少了这几条，"125% 屏被系统拉伸 1.25 倍"那个根因就回来了
                  "_enable_dpi_awareness", "_dpi_awareness_state", "_set_pmv2",
-                 "dpi_ratio", "_apply_scale", "_sync_dpi"]
+                 "dpi_ratio", "_apply_scale", "_sync_dpi",
+                 # ★★ 第二十五批（球心动图："没运行时就不动，正在运行时就动"）
+                 #   判据 / 帧号来源 / 时钟推进 / 三个状态位
+                 "is_working", "_avatar_frame", "_tick_avatar",
+                 "_working", "_work_t0", "_avatar_idx"]
         gmiss = [n for n in gmust if n not in gnames]
         # 文案常量核验：菜单标签 / 空闲提醒必须真在 exe 里。
         # ★ 第十四批：原来这里**另写了一份**只递归 code object 的收集器（和
@@ -517,7 +521,11 @@ def main():
         umust = ["draw_text_1x", "_text_mask", "Metrics1x", "_do_card", "_render",
                  "_mask", "_vgrad", "pad_for", "default_layout", "card_metrics",
                  "CARD_TOP", "CARD_BOT", "GROOVE", "SURF_TOP", "SURF_BOT",
-                 "SHADOW_PAD", "SHADOW_BLUR", "SHADOW_ALPHA", "SHADOW_DY"]
+                 "SHADOW_PAD", "SHADOW_BLUR", "SHADOW_ALPHA", "SHADOW_DY",
+                 # ★★ 第二十五批：球心动图（懒加载 / 时间轴 / 直径 / 贴图）
+                 "avatar_frames", "avatar_count", "avatar_index_at",
+                 "avatar_d", "draw_avatar", "_fit_square", "res_dir",
+                 "AVATAR_FILE", "AVATAR_INSET"]
         umiss = [n for n in umust if n not in ur_names]
         mc = module_consts(ur_co)
         #   ★ 值核验（不是名字）：这一批修的就是这几个数，被改回旧值就等于没修。
@@ -548,6 +556,19 @@ def main():
         if not (isinstance(sal, int) and sal <= 120 and isinstance(sdy, (int, float))
                 and sdy >= 3.0):
             bad.append("投影过重/过贴")
+        #   ★★ 动图素材必须真的在包里。这条**只能查 toc**：二进制资源不在
+        #     code object 里（`umust` 那套名字核验**永远看不到它**）——
+        #     `datas` 漏带的话，全部名字都在、全部取值都对，只有球心永远是个剪字。
+        #   ★ PyInstaller 6.x 的 `arc.toc` 是 **dict**（键=条目名），不是 list ——
+        #     按 list 写 `e[0]` 会取到**名字的第一个字符**，于是"资源明明在包里"
+        #     却报缺失（我自己先踩了一次）。名字里用的是反斜杠，统一成正斜杠再比。
+        _toc = getattr(arc, "toc", None) or {}
+        toc_names = {str(n).replace("\\", "/")
+                     for n in (_toc.keys() if hasattr(_toc, "keys") else _toc)}
+        gif_ok = any(n.endswith("ball_avatar.gif") for n in toc_names)
+        print("动图资源 ball_avatar.gif 打进包了:", gif_ok)
+        if not gif_ok:
+            bad.append("动图资源没打进包（datas 漏带）")
         print("渲染层必需名字缺失:", umiss if umiss else "无")
         print("渲染层取值不对:", bad if bad else "无")
         ur_ok = (not umiss) and (not bad)

@@ -578,6 +578,79 @@ try:
     settle()
     check("⑪ 干完回 idle → 收回球（窗口让开）", c.W == int(round(c._ball_d())), c.W)
 
+    # ============================================================ 第二十五批
+    # ★★ 球心动图：「没运行时就不动，正在运行时就动」（用户原话）。
+    #   这里测的是**状态 → 帧号**这条链，以及"帧号真的交给了渲染层"。
+    #   （"帧号画上去长什么样"由 test_guard 的 ㉴ 组按像素钉死。）
+    print("[9c] ★★ 第二十五批：球心小人 —— 不跑就站着、跑起来才动")
+    c._await_restore = False
+    c._hover = False
+    c.set_state("idle", "一键导出", c._idle_sub(), hold=0)
+    settle()
+    check("① 待机：画第 0 帧（**静止**在第一帧，不是不画）",
+          c._view_state()["avatar"] == 0, c._view_state()["avatar"])
+    check("② 待机的 `_working` 是 False（判据在 is_working，见 test_guard ㉴-1）",
+          c._working is False, c._working)
+
+    #   ★ "正在跑" = busy + hold=0。跑起来之后帧号要**按时钟**推进。
+    c.set_state("busy", "执行中…", "全选 · 复合片段 · 预合成", hold=0)
+    settle()
+    check("③ 开跑：`_working` 翻成 True", c._working, True)
+    check("④ 开跑那一刻从第 0 帧起（不是接着上次的帧数往下跑）",
+          c._avatar_idx == 0, c._avatar_idx)
+    c._work_t0 -= 0.25                      # 假装已经跑了 250ms（帧长 100ms）
+    c._tick_avatar()
+    check("⑤ 跑了 250ms → 帧号推到第 2 帧（时间轴由 ui_render 按 GIF 逐帧时长给）",
+          c._avatar_idx, 2)
+    check("⑥ 帧号透到 `_view_state()`（渲染层读的就是它）",
+          c._view_state()["avatar"], 2)
+
+    #   ★ 最关键的一环：帧号**真的被传进渲染层**了。
+    #     "算了但没传下去"是这一批最容易犯的错（而且屏幕上只表现为"一直定格"）。
+    _seen = []
+    _real_render = _ur.render
+    def _spy(*a, **kw):
+        _seen.append(kw.get("avatar"))
+        return _real_render(*a, **kw)
+    gui._ur.render = _spy
+    try:
+        c._redraw()
+    finally:
+        gui._ur.render = _real_render
+    check("⑦ ★★ 帧号真的交给了渲染层（不是「算完就扔」）",
+          _seen, [c._view_state()["avatar"]])
+
+    #   ★ 只推进"变了的那一下"：同一帧内重复调用不许重复重画（图是 10fps、循环是 30fps）。
+    _n = [0]
+    _real_redraw = c._redraw
+    c._redraw = lambda *a, **kw: _n.__setitem__(0, _n[0] + 1)
+    try:
+        c._tick_avatar()
+        c._tick_avatar()
+        c._tick_avatar()
+    finally:
+        c._redraw = _real_redraw
+    check("⑧ ★ 同一帧里连调 3 次 `_tick_avatar()` 一次都不重画（30fps 循环 / 10fps 图）",
+          _n[0] == 0, _n[0])
+
+    #   ★ 「开关已切」那种 busy 通知**不算在跑**（不然点个菜单小人也跳）。
+    c.set_state("busy", "导出守望已开", "导出窗口一关就提醒你还原", hold=5)
+    settle()
+    check("⑨ ★ `busy` + hold>0（「开关已切」的提示）**不算在跑**：小人回到静止",
+          (c._working is False and c._view_state()["avatar"] == 0),
+          (c._working, c._view_state()["avatar"]))
+    check("⑩ 收工时帧号归零（下次开跑从第一帧起，不接着跳）",
+          c._avatar_idx == 0, c._avatar_idx)
+
+    #   ★ ok / err / ask 保留原字形：✓ × ! 是**一眼可读**的信号，不能被小人顶掉。
+    _glyphs = {}
+    for _k in ("ok", "err", "ask"):
+        c.set_state(_k, "x", hold=0)
+        settle()
+        _glyphs[_k] = c._view_state()["avatar"]
+    check("⑪ ★ ok/err/ask 不画动图（退回 ✓ × ! —— 那三个字有一眼可读的信息量）",
+          _glyphs == {"ok": None, "err": None, "ask": None}, _glyphs)
+
     # 阶段表本身：起点必须递增、终点 100、步数与流水线对得上
     _st = core.PIPELINE_STAGES
     check("阶段表：起点递增不回头", all(_st[i][2] <= _st[i + 1][1] for i in range(len(_st) - 1)), True)

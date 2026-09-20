@@ -423,6 +423,11 @@ def ball_label(kind, pct):
     """圆球正中那个字符：busy 显示百分比数字（进度看外圈弧线），其余按状态给一个字。
 
     ★ 只给 1~3 个字符：球直径才 46px，塞不下词。**完整文案一律靠悬停展开**。
+    ★★ 2026-09-20 第二十五批：球心改画**动图**（用户："把剪的图片换成这个，
+      没运行时就不动，正在运行时就动"）—— 但这个函数**一个字都没改**：
+      它是"该显示什么"的语义层（测试直接对着它断言），
+      "画不画成小人"是渲染层的事（见 `_avatar_frame` / `ui_render.render(avatar=)`）。
+      两者分开之后，"动图素材缺失"只影响外观，不会把状态语义也弄丢。
     """
     if kind == "busy":
         try:
@@ -431,6 +436,27 @@ def ball_label(kind, pct):
             return BALL_TEXT["busy"]
         return str(max(0, min(100, p)))
     return BALL_TEXT.get(kind, BALL_TEXT["idle"])
+
+
+def is_working(kind, hold):
+    """这一状态算不算"**正在运行**"（球心那个小人动不动）—— 纯函数，测试直接断言。
+
+    ★ 判据为什么落在 `hold` 上：把 `kind="busy"` 的**全部**调用点数了一遍才定的 ——
+      · `hold=0` → "这件事还没完，跑完我自己 `set_state` 回来"
+        （执行中 / 取文件中 / 还原草稿中 / 正在体检 / 全自动导出中 / 正在中止…）
+        = **真的在跑**；
+      · `hold>0` → "一条通知，几秒后自动收回"
+        （导出守望已开 / 剪映路径已设置 / 已拦住会员弹窗 / 将嵌入剪映…）
+        = **没在跑**。
+      两者 `kind` 相同、配色也相同（都是橙），**只有 hold 分得开**。
+    ★ 试过、不行的那两个判据（记下来免得下次再试）：
+      · `self._cancel is not None`：`_extract_only` / 体检 / 导出守望那三条路
+        **根本不建** `_cancel`（明明在跑却判成没跑）；
+        而"正在启动剪映…"（hold=10，其实是**等用户**）反而会被判成在跑。
+      · `pct is not None`：只有带进度的那些算数，"正在中止…"这种没有百分比，
+        又被漏掉。
+    """
+    return kind == "busy" and not hold
 
 
 def morph_shape(expanded, pill_w, ball_d, pill_r):
@@ -991,6 +1017,12 @@ class Companion:
         self._cur = {"w": float(BASE_W), "r": float(BASE_R),
                      "bgv": 0.0, "fgv": 0.0, "pct": 0.0}
         self._ui_ready = False       # 画布建好了没（没建好不许播动画）
+        # ---- 第二十五批：球心动图（"没人时站着、干活时跳舞"）----
+        # ★ 同样必须在 `_build_ui()` 之前：`_build_ui → _paint → _redraw →
+        #   _view_state → _avatar_frame` 一上来就读这两个。
+        self._working = False        # 现在算不算"正在运行"（见 is_working）
+        self._work_t0 = 0.0          # 本轮开跑的时刻（动图的时钟零点）
+        self._avatar_idx = 0         # 当前画第几帧（不跑时恒为 0 = 停在第一帧）
         self._redraw_err = False     # 重画异常只报一次，别刷屏
         self._pushed_size = None     # 已经推给窗口的 (W,H)，避免每帧都发 SetWindowPos
         self._last_float = None      # 独立模式上次摆的位置
@@ -1212,6 +1244,41 @@ class Companion:
     def _ball_text(self):
         return ball_label(self.state[0], self._pct)
 
+    def _avatar_frame(self):
+        """球心那张动图这一帧该画**第几帧** —— `None` = 不画动图（照旧画字）。
+
+        ★ 三档，别合并（用户的原话就是两档，但代码里必须留出第三档）：
+          · `ok / err / ask` → `None`：✓ × ! 这几个字**带信息量**（成了 / 错了 /
+            要你动手），拿小人顶掉就等于把唯一的一眼可读信号删了。
+          · 没在跑（待机 + "开关已切"那种提示）→ `0`：**停在第一帧**，
+            就是用户要的"没运行时就不动"。
+          · 正在跑 → 按时钟推进的帧号，见 `_tick_avatar`。
+        """
+        if self.state[0] in ("ok", "err", "ask"):
+            return None
+        if not self._working:
+            return 0
+        return self._avatar_idx
+
+    def _tick_avatar(self):
+        """按**墙上时钟**推进动图帧号（只在"正在运行"时走）。
+
+        ★ 时间轴交给 `ui_render`（它按 GIF **自己的逐帧时长**建轴）——
+          主程序不写"每帧 100ms"这种话：这张图恰好是 100ms，但"恰好"不是契约，
+          换一张不均匀的动图就会跳帧。
+        ★ 帧号**变了才重画**：这张图 10fps，而本循环 30fps —— 不判这一下就是
+          3 倍白干（虽然渲染有缓存兜着，但"每 33ms 走一遍 4.5ms 的整窗渲染"
+          对 6 核本本上的电池不是小事）。
+        """
+        if not self._working:
+            return
+        if _ur.avatar_count() <= 1:
+            return
+        idx = _ur.avatar_index_at((time.time() - self._work_t0) * 1000.0)
+        if idx != self._avatar_idx:
+            self._avatar_idx = idx
+            self._redraw()
+
     def _build_ui(self):
         """按 self._scale 重算整套度量，再重画一帧。
 
@@ -1307,6 +1374,9 @@ class Companion:
             # 球贴窗口哪一端：展开时窗口向左（或右）长出去，球那一端不许跑掉
             "ball_x": (W - self.H) if self._ball_at_right() else 0,
             "ball_text": (self._ball_text() if ball_a > 0.004 else None),
+            # ★ 球心动图的帧号（None = 不画动图、照旧画字）。这里只回答"第几帧"，
+            #   "这一帧画多大 / 要不要给进度环让位"全在渲染层算（它才知道球多大）。
+            "avatar": (self._avatar_frame() if ball_a > 0.004 else None),
             "ball_pct": (float(cur["pct"]) if ring else None),
             "ring": ring,
             "pill": pill,
@@ -1337,6 +1407,7 @@ class Companion:
                 bar=(pill["bar"] if pill else None),
                 ball_a=st["ball_a"], pill_a=st["pill_a"],
                 hover=st["hover"], ball_x=st["ball_x"],
+                avatar=st["avatar"],
                 layout=self._lay,
                 sizes={"title": self._t_px, "sub": self._s_px})
             self._apply_window_size()
@@ -1762,6 +1833,16 @@ class Companion:
         self._redraw()
 
     def set_state(self, kind, text, sub=None, hold=0, pct=None, step=None):
+        # ★ 动图的"开跑 / 收工"**只在这里**判定一次（判据见 `is_working`）：
+        #   开跑 → 记下时钟零点、从第一帧起；收工 → 帧号归零（回到"站着不动"）。
+        #   放在 `state` 之前算：后面 `_paint → _redraw → _view_state` 立刻要读它。
+        working = is_working(kind, hold)
+        if working and not self._working:
+            self._work_t0 = time.time()
+            self._avatar_idx = 0
+        elif not working:
+            self._avatar_idx = 0
+        self._working = working
         self.state = (kind, text)
         self._until = time.time() + hold if hold else 0
         # ★ 进度只在 kind=="busy" 时显示；收尾（ok/err）把条藏掉，免得
@@ -2844,6 +2925,10 @@ class Companion:
         """
         try:
             self._poll_hover()      # ★ 悬停兜底（事件会丢，光标位置不会骗人）
+        except Exception:
+            pass
+        try:
+            self._tick_avatar()     # ★ 球心小人（只在"正在运行"时推进帧号，见那里）
         except Exception:
             pass
         try:

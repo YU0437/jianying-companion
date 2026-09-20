@@ -60,9 +60,11 @@
 """
 import ctypes
 import math
+import sys
 from ctypes import wintypes
+from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageSequence
 
 # ---------------------------------------------------------------- 设计标尺
 SHADOW_PAD = 10             # 投影留白：窗口比"形状"四周各大这么多（1x 尺寸）
@@ -522,7 +524,25 @@ _RAMP_CACHE = {}
 
 
 def _vgrad(w, h, top, bot):
-    """竖向渐变（缓存 —— 稳态下每帧重建一次是白扔 1.3ms）。"""
+    """竖向渐变（缓存 —— 稳态下每帧重建一次是白扔 1.3ms）。
+
+    ★★ 返回的是一份**副本**，调用方随便改（第二十五批修）。
+      为什么这里必须 `copy()` —— 这是个**真的踩了很久的隐形 bug**，值得写清楚：
+
+      旧版是 `return g`（直接把缓存对象交出去），而两个调用方都在它上面**就地 paste**：
+        · `_body` 往上叠"发丝亮线 + 内壁高光"（`paste((255,255,255), mask)`）；
+        · `_do_card` 往上叠卡片本体。
+      于是**同一个渐变被复用几次，那圈白就叠几次**：`alpha=74` 的白贴两遍 = 50%、
+      五遍 = 82%、四十遍 = **255（纯白）**。实测（`_probe_grad_drift2.py`）：
+      同一个球连渲 40 次，球顶那圈从 (121,121,124) 一路烧到 **(254,254,254)** ——
+      屏幕上就是"球顶上箍了一圈白塑料"。
+      更早没炸，是因为渲染结果本身有缓存（`_CACHE`）挡着"完全相同的参数"；
+      而**任何参数一变就会重建**（正在跑时 `pct` 每 1% 一变、悬停时 hover 连续变、
+      第二十五批之后动图每 100ms 变一帧）—— 也就是说这个 bug **专挑"最该好看"的
+      动态过程发作**，静态截图反而看不出来。
+      `copy()` 一张 272x272 的 RGB 是 ~0.1ms，而它省掉的是"重建 1.3ms" ——
+      缓存的意义完全保留，只是不再把可变状态漏出去。
+    """
     key = (w, h, top, bot)
     g = _GRAD_CACHE.get(key)
     if g is None:
@@ -535,7 +555,8 @@ def _vgrad(w, h, top, bot):
         if len(_GRAD_CACHE) > 48:
             _GRAD_CACHE.clear()
         _GRAD_CACHE[key] = g
-    return g
+    #   ★ 缓存里那张是**只读母版**：谁也别拿它去 paste。
+    return g.copy()
 
 
 def _vramp(w, h, lo, hi, p0=0.0, p1=1.0, gamma=1.0):
@@ -662,6 +683,230 @@ def with_alpha(img, a):
     return out
 
 
+# ================================================================ 球心动图
+# ★★ 2026-09-20 第二十五批（用户："把剪的图片换成这个，没运行时就不动，
+#    正在运行时就动"，并贴了一张 23 帧的小人动图）。
+#
+# 为什么是"渲染层自己认这张图"，而不是主程序解好帧再塞进来：
+#   · 主程序那边只有"状态"（idle / 正在跑），**帧号是渲染层的事**
+#     （它才知道球心那块可视区域到底多大、要不要给进度环让位）。
+#   · 早加载会拖慢启动（全解 23 帧 ≈ 32ms），所以**懒加载**：
+#     第一次真的要画头像时才解，失败就整条路退回"画字"（见 `render` 的契约）。
+#
+# 三道工序，各自只做一次或几次：
+#   ① ①  解 GIF  → `avatar_frames()`：每帧**等比装进正方形**（一个像素都不裁），
+#          两侧用"画面自己的边缘列"拉伸补满（edge extend）—— 因为最后要裁圆，
+#          补的是边缘色就**看不出接缝**（直接填个均值色会在左右各留一条淡竖带）。
+#   ② 裁圆    → `_avatar_disc(帧号, 直径)`：先 resize 再 `putalpha(圆遮罩)`。
+#          ★ 顺序不能反：**先缩再不透明→透明**，就不会出现"缩放假发边"
+#            （RGBA 的 resize 不预乘，先裁圆再缩会在圆周上带一圈背景色晕）。
+#          按 (帧号, 直径) 记忆 —— 直径只在"进/出进度环"或换 DPI 时变，
+#          所以一帧一辈子最多重算几次，稳态下 0 成本。
+#   ③ 贴上去  → `draw_avatar()`：RGB 底 + L 掩码（本文件的老规矩，混合是真的）。
+AVATAR_FILE = "ball_avatar.gif"
+AVATAR_SIDE = 160       # 烘焙边长上限（源图 250x291 → 取 min(w,h)=250，再降到 160）。
+                        #   ★ 160 够不够？**够，而且是算出来的不是拍的**：
+                        #     屏幕上小人最大只有 62px（= 球 75px × 球心占比，见
+                        #     `avatar_d`；1.5625 是本程序 scale 的上限），而 160 是
+                        #     **4 倍超采样后**要画的那张（d×SS）在 scale 1 下的尺寸。
+                        #     即"160 → 显示 40px" = 4 倍过采样，"160 → 显示 62px"
+                        #     = 2.6 倍 —— 超过 2 倍之后，多出来的精度在 40~62px 上
+                        #     **一个像素都看不出来**（`_probe_avside.py` 拿 160 和
+                        #     250 两版对拍过最终 1x 输出）。
+                        #   代价对比：250 版要 5.75MB 内存 + 46ms 烘焙，160 版
+                        #     **2.36MB + 28ms**。省下的正是"看不见的那部分"。
+AVATAR_MIN_D = 14       # 头像直径下限（1x / SS 空间都夹一刀，别算出 0）
+AVATAR_INSET = 4        # 没有进度环时：头像直径 = 球径 - 2×4（1x px）——
+                        #   ★ 这个数来自原型对拍（`_probe_avatar.py` 的 A~F 六案）：
+                        #     "整帧装进正方形 + 缩 4" 在 48px 球里最读得出"一个人在动"。
+AVATAR_GAP = 2          # 有进度环时：头像和环之间再留这么多（1x px）
+
+_AV = None              # None=没加载过 · False=加载失败（退回画字） · list[RGBA]
+_AV_MS = ()             # 逐帧**起始**时刻（ms），用来把墙上时钟映射成帧号
+_AV_TOTAL = 0           # 一轮总时长（ms）
+_AV_DISC = {}           # (帧号, 直径) → 圆形 RGBA（记忆化）
+
+
+def res_dir():
+    """随包资源所在目录：**打包后是 PyInstaller 的解包目录**，源码运行是脚本目录。
+
+    ★ 为什么不复用主程序那套 `Path(sys.executable).parent`：那个是"**安装**目录"
+      （放 使用说明.txt / 运行日志.txt / 草稿备份 这些**可写**的东西）。
+      打进 exe 的资源（spec 里的 `datas`）在 onefile 下被解到 `sys._MEIPASS`，
+      拿安装目录去找**一定找不到**。两条路的语义不一样，不能混。
+    """
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None) or str(Path(sys.executable).parent)
+        return Path(base)
+    return Path(__file__).resolve().parent
+
+
+def avatar_path():
+    return res_dir() / AVATAR_FILE
+
+
+def _fit_square(src, side):
+    """一帧 → side×side 的正方形：**等比缩到整个画面都装得下**（不裁任何像素）。
+
+    ★ 为什么选"装下"而不是"裁满"（原型里两种都试了）：动图的主体是**全身**
+      （头顶到脚），裁满必然砍掉头或脚中的一头，而成品是在 40px 的球心里看 ——
+      少一截就更读不出是个人。两侧的空白用**边缘列拉伸**补：贴到圆里无接缝。
+    ★ 一律先 `convert("RGBA")`：GIF 给的帧可能是 **P 模式**（调色板），
+      对 P 模式做 resize 是在**调色板索引**上插值 —— 出来的是花花绿绿的噪点，
+      不是图。这个坑不报错，只是画面变成一坨，所以必须显式转。
+    """
+    src = src if src.mode == "RGBA" else src.convert("RGBA")
+    w, h = src.size
+    side = max(1, int(side))
+    k = min(side / float(w), side / float(h))
+    nw, nh = max(1, int(round(w * k))), max(1, int(round(h * k)))
+    #   ★ 降采样用 BOX（面积平均）：和本文件别处同一个理由 —— 它是**精确覆盖率**、
+    #     不产生 LANCZOS 那种边缘过冲，还快一倍。3 倍的降采样倍率下两者看不出差别，
+    #     而这一步是一次性的（23 帧），省下的是启动时间。
+    r = src.resize((nw, nh), Image.BOX)
+    if nw == side and nh == side:
+        return r
+    out = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    x, y = (side - nw) // 2, (side - nh) // 2
+    out.paste(r, (x, y))
+    if x > 0:                      # 左右各把最外一列拉宽补满
+        out.paste(r.crop((0, 0, 1, nh)).resize((x, nh), Image.NEAREST), (0, y))
+        out.paste(r.crop((nw - 1, 0, nw, nh)).resize((side - nw - x, nh),
+                                                     Image.NEAREST), (x + nw, y))
+    if y > 0:                      # 上下同理（本图用不到，别的图会用）
+        out.paste(r.crop((0, 0, nw, 1)).resize((nw, y), Image.NEAREST), (x, 0))
+        out.paste(r.crop((0, nh - 1, nw, nh)).resize((nw, side - nh - y),
+                                                     Image.NEAREST), (x, y + nh))
+    return out
+
+
+def avatar_frames():
+    """球心动图的帧表（**懒加载，只解一次**）。
+
+    · 成功 → `list[RGBA]`（正方形、不透明；圆是贴的时候才裁的）
+    · 失败 → `False`（并且**记住失败**，别每帧都去开一次不存在的文件）
+
+    ★ 为什么在**这里**就把边长压到 `AVATAR_SIDE`，而不是留到贴的时候按需缩：
+      这一步是"一次投 28ms 换 3.4MB 内存"的分界线 —— 压完就能**丢掉原始帧**
+      （250x291 的 RGBA 一帧 291KB，23 帧 6.7MB），不压就得一直拎着。
+    ★ 返回 `False` 而不是抛异常：这是**外观**的一部分，一张素材缺失绝不该把
+      界面带崩 —— 调用方（`render`）看到 False 就照旧画那个字。
+    """
+    global _AV, _AV_MS, _AV_TOTAL
+    if _AV is not None:
+        return _AV
+    try:
+        im = Image.open(avatar_path())
+        raw, ms, acc = [], [], 0
+        for f in ImageSequence.Iterator(im):
+            ms.append(acc)
+            #   ★ 每一帧的停留时长**只有在这里读得到**（`Iterator` 边走边给
+            #     `.info["duration"]`）—— 所以时长和像素必须**同一趟**收完，
+            #     再 `Image.open` 一遍纯属白解一次图（32ms）。
+            acc += max(10, int(f.info.get("duration") or 100))
+            raw.append(f.convert("RGBA"))
+        if not raw:
+            _AV = False
+            return _AV
+        side = min(min(raw[0].size), AVATAR_SIDE)
+        _AV = [_fit_square(f, side) for f in raw]
+        _AV_MS, _AV_TOTAL = tuple(ms), max(1, acc)
+    except Exception as e:                            # 缺文件 / 坏 GIF / 无解码器
+        print(f"[ui] 球心动图不可用({e}) → 退回画字", flush=True)
+        _AV = False
+    return _AV
+
+
+def avatar_count():
+    """帧数（不可用时 0）—— 调用方拿它判断"要不要按时钟推进"。"""
+    f = avatar_frames()
+    return 0 if not f else len(f)
+
+
+def avatar_index_at(ms):
+    """墙上时钟（进入"正在运行"那一刻起的毫秒数）→ 帧号（循环）。
+
+    ★ 用**逐帧真实时长**累加出来的时间轴，而不是 `ms // 100`：这张图恰好每帧
+      100ms，但"恰好"不能写进代码 —— 换一张不均匀的动图就会跳帧。
+    """
+    if not _AV_MS:
+        avatar_frames()
+    n = len(_AV_MS)
+    if n <= 1:
+        return 0
+    t = int(ms) % _AV_TOTAL
+    lo, hi = 0, n - 1
+    while lo < hi:                    # 找最后一个起始时刻 <= t
+        mid = (lo + hi + 1) // 2
+        if _AV_MS[mid] <= t:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def avatar_d(ball, ring_inset, ring=False, s=1.0):
+    """球心头像的直径（1x px）—— **纯函数**，测试直接对着它断言。
+
+    · 没有进度环（待机）→ 球径 - 2×`AVATAR_INSET`（尽量填满球心）。
+    · 有进度环（正在跑）→ 缩到**环内沿以内**。★ 这一步不是"美观微调"：
+      48px 球 + ring_inset 7 时，环的内沿只到直径 ~31px，而待机头像是 40px ——
+      不缩的话头像会**整个盖住进度环**（环在球心半径 17px 上，头像半径 20px），
+      屏幕上就是"正在跑但看不到进度"。缩完之后环正好成了头像的外圈，
+      读起来像"带进度环的头像"，而不是两个元素打架。
+    """
+    s = float(s)
+    ball = float(ball)
+    if ring:
+        w_ring = max(2.0, 2.5 * s)              # 与 `_render` 里画环的线宽同源
+        return max(AVATAR_MIN_D, ball - 2.0 * (float(ring_inset) + w_ring
+                                               + AVATAR_GAP * s))
+    return max(AVATAR_MIN_D, ball - 2.0 * AVATAR_INSET * s)
+
+
+def _avatar_disc(fi, d):
+    """直径 d 的**圆形**头像（RGBA）—— 按 (帧号, 直径) 记忆化。"""
+    key = (int(fi), int(d))
+    got = _AV_DISC.get(key)
+    if got is not None:
+        return got
+    fr = avatar_frames()
+    if not fr:
+        return None
+    src = fr[int(fi) % len(fr)]
+    d = max(1, int(d))
+    sq = src if src.size == (d, d) else src.resize((d, d), Image.LANCZOS)
+    sq = sq.copy()
+    sq.putalpha(aa_mask(d, d, d / 2.0))
+    if len(_AV_DISC) > 256:
+        _AV_DISC.clear()
+    _AV_DISC[key] = sq
+    return sq
+
+
+def draw_avatar(cv, fi, cx, cy, d, a=1.0, ring_inset=7.0, ring=False, s=1.0):
+    """把第 `fi` 帧贴到 `cv`（**RGB** 底）的 (cx, cy) 圆心上，直径 `d`（SS 空间）。
+
+    ★ 逐帧的动画**必须**走这里：它只在"帧号或直径变了"时才真做一次 resize+裁圆
+      （见 `_avatar_disc`），稳态下就是一次 `paste`。
+    ★ 返回 True/False = 画没画成。画不成时调用方要**接着把那个字画上** ——
+      宁可球心是"剪"，也不能是空的。
+    """
+    d = int(round(d))
+    if d < 2:
+        return False
+    disc = _avatar_disc(fi, d)
+    if disc is None:
+        return False
+    box = (int(round(cx - d / 2.0)), int(round(cy - d / 2.0)))
+    mask = disc.getchannel("A")
+    a = max(0.0, min(1.0, float(a)))
+    if a < 0.999:                      # 形变淡入：只缩遮罩（底是 RGB，混合是真的）
+        mask = mask.point(lambda v: int(v * a))
+    cv.paste(disc.convert("RGB"), box, mask)
+    return True
+
+
 # ================================================================ 主渲染
 _CACHE = {}
 _CACHE_MAX = 32
@@ -686,7 +931,7 @@ def _cached(key, build):
 
 def render(w, h, r, *, scale=1.0, kind="idle", glyph="", title="", sub="",
            pct=None, bar=None, ball_a=1.0, pill_a=0.0, hover=0.0, ball_x=0.0,
-           layout=None, sizes=None):
+           layout=None, sizes=None, avatar=None):
     """渲染一帧悬浮窗 → `(w+2P, h+2P)` 的 RGBA 图，`P = pad_for(scale)`。
 
     · `ball_a` / `pill_a`：球内容 / 胶囊内容各自的透明度（形变动画用）。
@@ -697,22 +942,34 @@ def render(w, h, r, *, scale=1.0, kind="idle", glyph="", title="", sub="",
       `ui_metrics(scale)`** —— 宽度计算和绘制读同一份数，才能保证"量得下就画得下"。
     · `sizes`：字号（**最终 1x 像素**）覆盖，只给需要改的键
       （`_fit_width` 到上限还放不下时降主文案字号走它）。不传则按 `scale` 推。
+    · `avatar`：球心动图**帧号**（`int`）或 `None`。
+      · `None` = 不画动图，球心 / 胶囊图标位照旧画 `glyph`（"✓ / × / !" 那些
+        **有信息量**的字，以及 `busy` 的百分比数字）。
+      · `0` = 动图**静止在第一帧**（"没运行时就不动"）。
+      · `n>0` = 那一帧（"正在运行时就动"由调用方按时钟推进帧号，见 `avatar_index_at`）。
+      ★ 给了帧号就**同时**顶掉球心和胶囊图标位里的字 —— 一次形变（球↔横条）里
+        不能"球上是小人、展开变成剪字"，那是同一张脸上换脸。
+        代价是 `busy` 的百分比数字不再画在球心；进度由**进度环**（收起）
+        和**底部进度条**（展开）承担，数字仍由 `ball_label` / `pill_glyph` 给出。
+      ★ 帧号**必须进缓存键**（否则 23 帧全命中同一张图，屏上就一个定格）。
+      ★ 动图取不到时**自动退回画字**，不会因为一张素材把界面带崩。
     """
     L = default_layout(scale) if layout is None else layout
     S = default_sizes(scale)
     if sizes:
         S.update({k: v for k, v in sizes.items() if k in S})
+    av = None if avatar is None else int(avatar)
     key = (round(float(w)), round(float(h)), round(float(r), 1),
            round(float(scale), 3), kind, glyph, title, sub,
            None if pct is None else round(float(pct), 1),
            None if bar is None else round(float(bar), 2),
            round(ball_a, 2), round(pill_a, 2), round(hover, 2),
-           round(float(ball_x), 1), pack_layout(L), pack_sizes(S))
+           round(float(ball_x), 1), pack_layout(L), pack_sizes(S), av)
     return _cached(key, lambda: _render(*key))
 
 
 def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
-            ball_a, pill_a, hover, ball_x, lay, szs):
+            ball_a, pill_a, hover, ball_x, lay, szs, avatar=None):
     s = float(scale)
     # `lay` / `szs` 进缓存前被拍成了元组（元组才可哈希、才能当缓存键）——
     #   这里还原成字典，下面的绘制代码就不用记"第几个是 pad"。
@@ -724,14 +981,17 @@ def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
     cv, mask = _body(w, h, r, hover=hover, s=s, pad=P)
     d = ImageDraw.Draw(cv, "RGBA")          # ★ RGB 底 → 混合是真的
 
-    # ——— 球的内容（进度环 + 数字）———
+    # ——— 球的内容（动图 / 进度环 + 数字）———
     if ball_a > 0.004:
         bx = ox + int(round(ball_x * SS))
         #   ★ 环心离球边多少 —— 取 `lay["ring_inset"]`（**单一来源**，见 default_layout）。
         inset = float(lay["ring_inset"]) * SS
         lw = max(2, int(round(2.5 * s * SS)))
         box = [bx + inset, oy + inset, bx + h2 - inset, oy + h2 - inset]
-        if kind == "busy" and pct is not None:
+        #   ★ 有环 = 正在跑且有百分比。头像的直径**取决于有没有环**（见 `avatar_d`
+        #     的注释：不缩就会被头像整个盖住，屏幕上看不到进度）。
+        ring = (kind == "busy" and pct is not None)
+        if ring:
             d.ellipse(box, outline=_fade(GROOVE, ball_a), width=lw)
             frac = max(0.0, min(1.0, float(pct) / 100.0))
             if frac > 0.002:
@@ -740,8 +1000,16 @@ def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
             txt, px = glyph, sz["pct"]
         else:
             txt, px = glyph, sz["ball"]
-        draw_text_1x(cv, (bx + h2 / 2.0, oy + h2 / 2.0 + 1 * s * SS), txt,
-                     font("bold", px), _fade(_rgba(LABEL), ball_a), "mm")
+        cx, cy = bx + h2 / 2.0, oy + h2 / 2.0
+        #   ★ 动图优先、字是兜底：画得成就不画字（"剪"由小人顶掉），
+        #     素材缺失 / 解码失败时**照旧画那个字** —— 球心绝不能是空的。
+        drawn = (avatar is not None and draw_avatar(
+            cv, avatar, cx, cy,
+            avatar_d(h2 / SS, float(lay["ring_inset"]), ring=ring, s=s) * SS,
+            a=ball_a, ring_inset=float(lay["ring_inset"]), ring=ring, s=s))
+        if not drawn:
+            draw_text_1x(cv, (cx, cy + 1 * s * SS), txt,
+                         font("bold", px), _fade(_rgba(LABEL), ball_a), "mm")
 
     # ——— 胶囊的内容（图标盘 + 两行字 + 底部进度条）———
     if pill_a > 0.004:
@@ -755,7 +1023,12 @@ def _render(w, h, r, scale, kind, glyph, title, sub, pct, bar,
         dcx = ox + lpad * SS + idia / 2.0
         d.ellipse([dcx - idia / 2.0, icy - idia / 2.0,
                    dcx + idia / 2.0, icy + idia / 2.0], fill=_fade(DISC, pill_a))
-        if glyph:
+        #   ★ 球心那个小人**在横条里是同一个**（图标位）—— 否则一悬停展开，
+        #     球上的小人就"变回一个剪字"，同一次形变里换了张脸。
+        drawn = (avatar is not None and draw_avatar(
+            cv, avatar, dcx, icy, avatar_d(idia_1x, 0.0, ring=False, s=s) * SS,
+            a=pill_a, ring_inset=0.0, ring=False, s=s))
+        if not drawn and glyph:
             draw_text_1x(cv, (dcx, icy + s * SS), glyph, font("bold", sz["disc"]),
                          _fade(_rgba(accent(kind)), pill_a), "mm")
         tx = ox + float(lay["tx"]) * SS
