@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))          # 进度条断言要直接读 core 的常量
 import jy_core as core
+import ui_render as _ur
 spec = importlib.util.spec_from_file_location("companion_gui", HERE / "剪映伴侣.py")
 gui = importlib.util.module_from_spec(spec)
 sys.modules["companion_gui"] = gui
@@ -77,6 +78,15 @@ try:
         c.root.after_cancel(_sc)
     check("首次体检的定时弹窗可被取消（自动化里不许挂住）", True)
 
+    # ★★ 第二十四批：测试必须**与显示器 DPI 无关**。
+    #   生效缩放 = `_scale_follow`（跟随剪映）× `_dpi`（显示器 dpi/96），
+    #   而开发机主屏是 125% —— 不钉住的话下面所有"像素尺寸 / 字号"断言
+    #   都会随开发机变化（并且 CI 上会假绿）。DPI 本身另有专门断言。
+    c._dpi = 1.0
+    c._scale_follow = 1.0
+    c._scale = 1.0
+    c._build_ui()
+
     # ★★ 2026-09-19 第十二批：默认形态从"横条"改成**悬浮球**。
     #   用户原话「做成悬浮球样式，不然会挡住用户操作」—— 所以"初始就是小球"
     #   成了新的硬契约，而横条宽度降级为"展开时才用得上"的目标值 `c._pill_w`。
@@ -94,14 +104,29 @@ try:
     check("初始高度 = 基准（加宽只动宽度，不动高度）", c.H == gui.BASE_H, c.H)
     c._hover = True                      # 悬停 = 展开，才看得到完整文案
     settle()
-    check("★ 悬停展开后，常驻副标题「预合成 · 存草稿 · 清空原内容 · 你手动拖入」完整可见（不被裁）",
-          c._fs.measure(c._sub) <= c.W - max(20, int(round(36 * c._scale)))
-          - max(8, int(round(10 * c._scale))), c._fs.measure(c._sub))
-    check("画布元素齐备（球套件 + 胶囊套件两套都要在）",
-          all(getattr(c, k, None) for k in ("bg_item", "icon_bg_item", "icon_item",
-                                            "txt_item", "sub_item",
-                                            "ring_item", "arc_item", "ball_item",
-                                            "bar_track", "bar_fill")))
+    check("★ 悬停展开后，副标题「预合成 · 存草稿 · 清空原内容 · 你手动拖入」完整可见（不被裁）",
+          c._fs.measure(c._sub) <= c._view_state()["avail"],
+          (c._fs.measure(c._sub), c._view_state()["avail"]))
+    # ★★ 第二十三批：界面上不再有任何 Canvas 图元，"这一帧长什么样"改由
+    #   `_view_state()`（纯函数）回答；渲染交给 `ui_render.render`（逐像素 alpha）。
+    _st1 = c._view_state()
+    check("★ 渲染层就位：展开态下胶囊内容齐备（图标位 / 主文案 / 副文案都在）",
+          (_st1["pill"] is not None
+           and _st1["pill"]["glyph"] == gui.pill_glyph(c.state[0], c._pct)
+           and _st1["pill"]["title"] == c._txt
+           and _st1["pill"]["sub"] == c._sub), _st1["pill"])
+    _im1 = _ur.render(c.W, c.H, c.R, scale=c._scale, kind=c.state[0],
+                      glyph=_st1["pill"]["glyph"], title=_st1["pill"]["title"],
+                      sub=_st1["pill"]["sub"], bar=_st1["pill"]["bar"],
+                      ball_a=_st1["ball_a"], pill_a=_st1["pill_a"],
+                      hover=_st1["hover"], ball_x=_st1["ball_x"],
+                      layout=c._lay, sizes={"title": c._t_px, "sub": c._s_px})
+    check("★ 渲染出的位图 = 形状 + 两侧投影留白（投影不会被窗口边切掉）",
+          _im1.size == (c.W + 2 * c._pad, c.H + 2 * c._pad), _im1.size)
+    _ah1 = _im1.getchannel("A").histogram()
+    check("★ 形状之外真透明 + 边缘是**覆盖率**（真抗锯齿 —— 这就是「不廉价」的根）",
+          (_im1.getchannel("A").getpixel((0, 0)) == 0 and sum(_ah1[8:247]) > 40),
+          True)
     c._hover = False
     settle()
 
@@ -151,12 +176,12 @@ try:
         for kind, txt, sub in LONG_CASES:
             c.set_state(kind, txt, sub, hold=0)
             settle()
-            tx = max(20, int(round(36 * s)))
-            pad_r = max(8, int(round(10 * s)))
-            avail = c.W - tx - pad_r
-            # 界面上**真实显示**的文字（省略号会出现在这里）== 原文 → 说明没被裁
-            shown_t = c.cv.itemcget(c.txt_item, "text")
-            shown_s = c.cv.itemcget(c.sub_item, "text")
+            # ★ 宽度口径直接问 `_view_state()`（它和渲染层读的是同一份 ui_metrics）
+            _vs = c._view_state()
+            avail = _vs["avail"]
+            _pv = _vs["pill"]
+            # 界面上**真实交给渲染层的文字**（省略号会出现在这里）== 原文 → 说明没被裁
+            shown_t, shown_s = _pv["title"], _pv["sub"]
             slack = avail - max(c._f.measure(shown_t), c._fs.measure(shown_s))
             slack_min = slack if slack_min is None else min(slack_min, slack)
             if shown_t != txt or shown_s != sub or slack < 0:
@@ -184,7 +209,8 @@ try:
         ws.add(c._pill_w)
     check("倒计时 20 秒内宽度变化次数很少（≤2 次）", len(ws) <= 2, sorted(ws))
     check("抖动期间宽度始终放得下文案（没有为了「稳定」而裁字）",
-          c._f.measure(c.cv.itemcget(c.txt_item, "text")) <= c.W - 46, (c.W,))
+          c._f.measure(c._view_state()["pill"]["title"]) <= c._view_state()["avail"],
+          (c.W, c._view_state()["avail"]))
     c._hover = False
     settle()
     check("抖动期间窗口实际宽度 = 球径（收起态不该被文案拉长）",
@@ -329,24 +355,31 @@ try:
     check("首次读数直接锁住（locked=None）", gui.stable_ref(816, None) == 816)
 
     # ③ 端到端：真的调 _maybe_rescale，验证"稳定持续才生效"这道闸
+    #   ★ 第二十四批：判定的输入是 `_scale_follow`（**不含 dpi**）——
+    #     否则球被拖到另一块 dpi 的屏上时，判定会把"dpi 变化"误当成"用户改了缩放"，
+    #     然后反向把自己调小（见 Companion.__init__ 的注释）。
     c._ref_locked = None
     c._cand_s = None
-    c._scale = 1.0
+    c._scale_follow = 1.0
     # 先喂两次建立参考高
     c._maybe_rescale(work_h)
     c._maybe_rescale(work_h)
-    c._scale = 1.0
+    c._scale_follow = 1.0
     c._cand_s = None
     tiny = int((c._ref_locked or work_h) * 0.4)
     c._maybe_rescale(tiny)
     check("第一次算出新缩放**不立刻生效**（先观察稳不稳）",
-          abs(c._scale - 1.0) < 1e-9, c._scale)
+          abs(c._scale_follow - 1.0) < 1e-9, c._scale_follow)
     check("已经记下候选缩放", c._cand_s is not None, c._cand_s)
     # 模拟"稳定持续了 RESCALE_HOLD 秒"
     c._cand_t0 = time.time() - (gui.RESCALE_HOLD + 0.5)
     c._maybe_rescale(tiny)
     check("稳定持续够了才真的改（且夹在下限 0.85）",
-          abs(c._scale - 0.85) < 1e-9, c._scale)
+          abs(c._scale_follow - 0.85) < 1e-9, c._scale_follow)
+    #   ★ 再确认一次"两个因子的合成"真的生效（生效缩放 = 跟随 × dpi）
+    check("生效缩放 = 跟随 × 显示器 dpi（换屏逻辑读的就是它）",
+          abs(c._scale - c._scale_follow * c._dpi) < 1e-9,
+          (c._scale, c._scale_follow, c._dpi))
 
     c._scale = 1.0
     c._build_ui()
@@ -437,14 +470,28 @@ try:
     settle()
 
     def _bar_state():
-        return (c.cv.itemcget(c.bar_track, "state"), c.cv.itemcget(c.bar_fill, "state"))
+        """进度条这一帧该不该出现（第二十三批：不再去 Canvas 里读 `state`）。
+
+        `pill is None` = 整个胶囊都没画（球态）；`bar is None` = 胶囊在但没进度。
+        """
+        pv = c._view_state()["pill"]
+        if pv is None:
+            return ("hidden", "hidden")
+        return ("normal", "normal") if pv["bar"] is not None else ("hidden", "hidden")
 
     def _fill_w():
-        # ★ 第二十一批：进度条从 `create_rectangle` 换成了**胶囊**（round_rect
-        #   → create_polygon，4*(seg+1)=100 个坐标点），所以不能再按"4 个数"
-        #   解包。取所有 x 的 min/max 当包围盒宽度，语义和旧写法一致。
-        xs = c.cv.coords(c.bar_fill)[0::2]
-        return int(max(xs) - min(xs))
+        """填充长度 = 内宽 × 比例。
+
+        ★ 内宽与渲染层 `_render` 用的是**同一组度量**（左留白 + 右留白），
+          所以这里算出来的长度就是屏幕上那条的长度。
+        """
+        pv = c._view_state()["pill"]
+        if pv is None or pv["bar"] is None:
+            return 0
+        return int(round((c.W - c._pad_l - c._pad_r) * pv["bar"]))
+
+    def _bar_inner():
+        return c.W - c._pad_l - c._pad_r
 
     print("[9] 进度条（展开态）")
     c._pct = None
@@ -454,11 +501,16 @@ try:
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 26%", hold=0, pct=26, step=4)
     settle()
     check("进度条：跑起来时两条都显示", _bar_state() == ("normal", "normal"), _bar_state())
-    check("进度条：填充色跟着状态走（busy=黄）",
-          c.cv.itemcget(c.bar_fill, "fill") == gui.BUSY, c.cv.itemcget(c.bar_fill, "fill"))
+    #   ★ 这条在 Canvas 时代才有意义（那时进度条的 `fill` 是主程序自己写的色值）。
+    #     第二十三批改成整帧渲染后，进度条的颜色由渲染层按 `kind` 取强调色，
+    #     主程序不再经手任何色值 —— 所以"bar 的 fill"这条断言**不该再存在**，
+    #     改由 test_guard 的 ⑥c（两处色表必须色相同源）覆盖。
+    check("进度条：颜色不再由主程序写死（渲染层从 kind 自己取强调色）",
+          "bar=(pill[\"bar\"] if pill else None)" in
+          inspect.getsource(gui.Companion._redraw), True)
     w26 = _fill_w()
     check("进度条：26% 时填充 ≈ 内宽的 1/4",
-          abs(w26 - (c.W - 2 * c._bar_pad) * 0.26) <= 2, w26)
+          abs(w26 - _bar_inner() * 0.26) <= 2, (w26, _bar_inner()))
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 80%", hold=0, pct=80, step=4)
     settle()
     w80 = _fill_w()
@@ -466,7 +518,7 @@ try:
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 200%", hold=0, pct=200, step=4)
     settle()
     check("进度条：超过 100% 不会画到按钮外面去",
-          _fill_w() <= c.W - 2 * c._bar_pad, _fill_w())
+          _fill_w() <= _bar_inner(), (_fill_w(), _bar_inner()))
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · -5%", hold=0, pct=-5, step=4)
     settle()
     check("进度条：负数不会反向画", _fill_w() >= 0, _fill_w())
@@ -492,40 +544,35 @@ try:
     settle()
     check("① busy 且没悬停 → 收成球", c.W == int(round(c._ball_d())), c.W)
     check("② 球里显示的就是百分比数字（进度不用展开也看得见）",
-          c.cv.itemcget(c.ball_item, "text") == "40", c.cv.itemcget(c.ball_item, "text"))
-    check("③ 进度弧画出来了（弧形，不是整圈）",
-          c.cv.itemcget(c.arc_item, "state") == "normal", c.cv.itemcget(c.arc_item, "state"))
-    check("④ 进度弧长度 = 40%（extent = -360*0.4）",
-          abs(float(c.cv.itemcget(c.arc_item, "extent")) + 144.0) < 1.0,
-          c.cv.itemcget(c.arc_item, "extent"))
-    check("⑤ 球态下胶囊套件（图标位/文字/进度条）全隐藏 —— 这才叫不挡事",
-          all(c.cv.itemcget(i, "state") == "hidden"
-              for i in (c.txt_item, c.sub_item, c.icon_bg_item, c.icon_item,
-                        c.bar_track, c.bar_fill)))
+          c._view_state()["ball_text"] == "40", c._view_state()["ball_text"])
+    check("③ 进度弧画出来了（busy + 有百分比 → ring=True，其余状态不画外圈）",
+          c._view_state()["ring"] is True, c._view_state()["ring"])
+    check("④ 进度弧长度 = 40%（渲染层按 360*frac 画）",
+          abs(c._view_state()["ball_pct"] - 40.0) < 1e-6, c._view_state()["ball_pct"])
+    check("⑤ 球态下胶囊套件（图标位/文字/进度条）整块不画 —— 这才叫不挡事",
+          c._view_state()["pill"] is None, c._view_state()["pill"])
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 90%", hold=0, pct=90, step=4)
     settle()
-    check("⑥ 进度变了球里的数字跟着变", c.cv.itemcget(c.ball_item, "text") == "90",
-          c.cv.itemcget(c.ball_item, "text"))
-    check("⑦ 进度弧也跟着变长",
-          abs(float(c.cv.itemcget(c.arc_item, "extent")) + 324.0) < 1.0,
-          c.cv.itemcget(c.arc_item, "extent"))
+    check("⑥ 进度变了球里的数字跟着变", c._view_state()["ball_text"] == "90",
+          c._view_state()["ball_text"])
+    check("⑦ 进度弧也跟着变长", abs(c._view_state()["ball_pct"] - 90.0) < 1e-6,
+          c._view_state()["ball_pct"])
     c._hover = True
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 90%", hold=0, pct=90, step=4)
     settle()
+    _st8 = c._view_state()
     check("⑧ 悬停 → 球让位、横条全套出来（含底部进度条）",
-          c.cv.itemcget(c.txt_item, "state") == "normal"
-          and c.cv.itemcget(c.bar_track, "state") == "normal",
-          (c.cv.itemcget(c.txt_item, "state"), c.cv.itemcget(c.bar_track, "state")))
+          _st8["pill"] is not None and _st8["pill"]["bar"] is not None,
+          (None if _st8["pill"] is None else _st8["pill"]["bar"]))
     check("⑨ 悬停展开时球套件淡出干净（不叠在文字上）",
-          c.cv.itemcget(c.ball_item, "state") == "hidden"
-          and c.cv.itemcget(c.ring_item, "state") == "hidden",
-          (c.cv.itemcget(c.ball_item, "state"), c.cv.itemcget(c.ring_item, "state")))
+          (_st8["ball_text"], _st8["ring"]) == (None, False),
+          (_st8["ball_text"], _st8["ring"]))
     c._hover = False
     c._await_restore = True
     c.set_state("ok", "等你导出", "导出完点我 → 还原草稿（回到预合成前）", hold=0)
     settle()
     check("⑩「等你导出」不悬停也展开（球里塞不下这条指令）",
-          c.cv.itemcget(c.txt_item, "state") == "normal", c.cv.itemcget(c.txt_item, "state"))
+          c._view_state()["pill"] is not None, c._view_state()["pill"])
     c._await_restore = False
     c.set_state("idle", "一键导出", c._idle_sub(), hold=0)
     settle()
@@ -610,32 +657,30 @@ try:
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 42%", hold=0, pct=42, step=4)
     settle()
     check("㉩ 展开态图标位真的画上了「42」",
-          c.cv.itemcget(c.icon_item, "text") == "42",
-          c.cv.itemcget(c.icon_item, "text"))
+          c._view_state()["pill"]["glyph"] == "42", c._view_state()["pill"]["glyph"])
 
     # ㉪ 通知卡正文折行（旧版单行 64 高，会把"要用户做的事"砍掉）
     c._hover = False
     c.set_state("idle", "一键导出", c._idle_sub(), hold=0)
     settle()
-    c.notify("导出完成了", "左键点球 → 还原草稿（回到预合成前），产物文件一个字节不碰",
-             kind="ask", hold=0)
+    _msg22 = "左键点球 → 还原草稿（回到预合成前），产物文件一个字节不碰"
+    c.notify("导出完成了", _msg22, kind="ask", hold=0)
     _c22 = c._card
     check("㉪ 通知卡建出来了", _c22 is not None, _c22 is not None)
     if _c22 is not None:
         check("㉫ ★ 长正文折行 → 卡片跟着变高（不再是死值 64）", _c22.h > 64, _c22.h)
-        _body22 = [i for i in _c22.cv.find_all() if _c22.cv.type(i) == "text"
-                   and "\n" in str(_c22.cv.itemcget(i, "text"))]
-        check("㉬ 正文是**多行文本项**（交给 tk 排版，别自己猜行距）",
-              len(_body22) == 1, len(_body22))
-        _alltxt22 = " ".join(str(_c22.cv.itemcget(i, "text"))
-                             for i in _c22.cv.find_all()
-                             if _c22.cv.type(i) == "text")
-        check("㉭ ★ 被砍掉的半句「产物文件一个字节不碰」真的显示出来了",
-              "一个字节不碰" in _alltxt22, _alltxt22)
+        # ★★ 第二十三批：卡片是一张位图，没有可读的 Canvas 图元了 —— 改断言
+        #    `card.spec`（生成这张图的输入）。语义比"截图像不像"清楚得多。
+        _sp22 = _c22.spec
+        check("㉬ ★ 正文折成多行交给渲染层逐行画",
+              len(_sp22["lines"]) > 1, _sp22["lines"])
+        check("㉭ ★ 被砍掉的半句「产物文件一个字节不碰」真的在里面（整句一字不少）",
+              "".join(_sp22["lines"]).replace(" ", "") == _msg22.replace(" ", ""),
+              "".join(_sp22["lines"]))
         c._drop_card()
         check("㉮ 通知与确认共用一张卡（同一时刻只有一张）", c._card is None, c._card)
 
-    # ㉯ 确认卡的按钮：坐标路由可用 + 文字颜色永远显式（不许被 fill="" 洗成默认色）
+    # ㉯ 确认卡的按钮：坐标路由必须切到**正确的那一个**，且文字颜色永远显式
     _seen22 = []
     _hits22 = []
 
@@ -643,21 +688,24 @@ try:
         card = c._card
         if not card:
             return
-        _y = card.h - 20
-        for _ev, _kw in (("<Motion>", dict(x=160, y=_y)),
-                         ("<Leave>", dict(x=160, y=_y)),
-                         ("<Motion>", dict(x=213, y=_y))):
+        # ★ 事件坐标是**窗口坐标**（含投影留白 P）—— `card_buttons()` 给的矩形
+        #   也是这个坐标系，所以两者能直接比。
+        _P = _ur.pad_for(c._scale)
+        _y = _P + card.h - 20                 # 落在按钮行里
+        _xl = _P + int(card.w * 0.25)         # 左半 → 「取消」
+        _xr = _P + int(card.w * 0.75)         # 右半 → 「开始」
+        for _ev, _kw in (("<Motion>", dict(x=_xl, y=_y)),
+                         ("<Leave>", dict(x=_xl, y=_y)),
+                         ("<Motion>", dict(x=_xr, y=_y))):
             try:
-                card.cv.event_generate(_ev, **_kw)
-                card.cv.update_idletasks()
+                card.top.event_generate(_ev, **_kw)
+                card.top.update_idletasks()
             except Exception:
                 pass
-            _seen22.append([str(card.cv.itemcget(i, "fill"))
-                            for i in card.cv.find_all()
-                            if card.cv.type(i) == "text"])
+            _seen22.append(card.spec.get("hot"))
         _hits22.append(True)
         try:
-            card.cv.event_generate("<Button-1>", x=213, y=_y)   # 点「开始」
+            card.top.event_generate("<Button-1>", x=_xr, y=_y)   # 点「开始」
         except Exception:
             pass
 
@@ -678,18 +726,25 @@ try:
         return False
 
     gui.ask_yes = _stub_yes22
+    # ★★ 还得把"窗口该不该显示"的判定钉住（第二十三批踩到的随机失败）：
+    #    `_follow_fast` 每 33ms 跑一次，一旦判定"该隐藏"，`_set_shown(False)`
+    #    会**顺带收掉卡片** —— 生产上这是对的（球都藏了，头顶的卡不能留着），
+    #    但这一段测的是**卡片的按钮路由**，被它打断就成了"有时过有时不过"
+    #    （实测：卡片有时活 30ms、有时活 1s）。判定钉成"该显示"即可隔离。
+    _keep_show22 = gui.Companion._should_show
+    gui.Companion._should_show = lambda self: True
     try:
         _ans22 = c.ask_confirm("开始导出？", "全选 → 复合片段 → 预合成。\n\n草稿会先备份。",
                                ok_label="开始", no_label="取消", kind="ask")
     finally:
         gui.ask_yes = _keep_yes22
+        gui.Companion._should_show = _keep_show22
     check("㉯ ★ 自绘确认卡真的建出来了（没有回退到系统模态框）",
           not _fellback22, _fellback22)
     check("㉰ 点「开始」返回 True（坐标路由可用，整块按钮区都是热区）",
           (_ans22, _hits22) == (True, [True]), (_ans22, _hits22))
-    _flat22 = [f for row in _seen22 for f in row]
-    check("㉱ ★ 悬停/移开过程中，按钮文字颜色**从没**被洗成空串（不再是黑字）",
-          bool(_flat22) and all(f != "" for f in _flat22), _flat22)
+    check("㉱ ★ 悬停高亮切到**正确的那一个**按钮（左→取消 / 移开→无 / 右→开始）",
+          _seen22 == ["no", None, "ok"], _seen22)
     check("㉲ 确认卡用完即收（不留孤儿顶层窗）", c._card is None, c._card)
 
     # ============================================================ 第十四批

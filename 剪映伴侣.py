@@ -26,9 +26,9 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import font as tkfont
 
 import jy_core as core
+import ui_render as _ur        # 自绘渲染层（PIL 超采样 + 逐像素 alpha 上屏）
 
 if getattr(sys, "frozen", False):
     try:
@@ -48,8 +48,118 @@ if getattr(sys, "frozen", False):
         pass
 
 # ---------------------------------------------------------------- DPI
-# 不要声明 DPI awareness：tk 坐标与系统 DPI 虚拟化一致时，窗口尺寸和
-# 点击命中才正确；声明后实测出现 0.8 倍缩放错位（186x37 vs 232x46）。
+# ★★ 2026-09-20 第二十四批（用户："ui 还是丑，看着廉价"）：**必须声明 DPI awareness**。
+#
+#   旧注释写的是"不要声明"，理由是"声明后实测出现 0.8 倍缩放错位（186x37 vs 232x46）"。
+#   那句话把**症状**当成了**结论**：0.8 = 96/120，是当年把 `dpi / 96` **写反**了导致的，
+#   不是"声明 awareness"本身的错。而"不声明"的代价大得多，只是没人往那儿看：
+#
+#   本机主屏 125%（物理 1920 / 逻辑 1536）。进程不声明 awareness 时，
+#   Windows 会把窗口当成"96 DPI 世界里的东西"再**整体拉伸 1.25 倍**（DPI 虚拟化）。
+#   我们是 `UpdateLayeredWindow` 逐像素上屏 —— 被拉伸的就是我们自己画的那张图：
+#   4 倍超采样做出来的抗锯齿、FreeType 按 13px 排好的中文笔画，全部被系统
+#   重新采样糊掉一层。而且 62 逻辑 px → 77.5 物理 px **不是整数**，采样点落在半像素上，
+#   糊得更厉害。
+#
+#   实测证据：`shots/v_dpi_pair.png`（同一颗球，左＝1x 位图被拉伸 1.25、右＝按 1.25x
+#   原生渲染）。左边"剪"字的横竖笔画糊成一片灰边，右边笔画是利落的 ——
+#   这正是"看着廉价"的主因之一（次要主因见 ui_render 的投影/球面对比度）。
+#
+#   所以：启动时（**必须在任何 Tk 窗口建立之前**）声明 PER_MONITOR_AWARE_V2，
+#   然后所有度量乘 `dpi_ratio()`（见下）。这样球在两块屏上都是 1:1 原生像素：
+#   125% 的屏上形状 48 → 60 物理 px（和用户现在看到的一样大），只是**不再被拉伸**。
+_DPI_AWARENESS = None
+#   DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+_DPI_PMV2 = -4
+
+
+def _dpi_awareness_state():
+    """当前进程的 DPI 感知级别（0=unaware / 1=system / 2=per-monitor）。"""
+    try:
+        v = ctypes.c_int()
+        if ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(v)) == 0:
+            return {0: "unaware", 1: "system", 2: "per-monitor"}.get(v.value, "?")
+    except Exception:
+        pass
+    return "?"
+
+
+def _set_pmv2():
+    """声明 PER_MONITOR_AWARE_V2。返回是否成功。
+
+    ★ 必须**显式**声明 argtypes/restype：不声明时 ctypes 会把 `(HANDLE)-4`
+      当 32 位 int 传、返回值也按 c_int 收 —— 在 64 位下调用失败还看不出原因
+      （第一版就是这么"静默掉到 shcore 的 v1"的）。
+    """
+    u = core.user32
+    u.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    u.SetProcessDpiAwarenessContext.restype = ctypes.c_bool
+    return bool(u.SetProcessDpiAwarenessContext(ctypes.c_void_p(_DPI_PMV2)))
+
+
+def _enable_dpi_awareness():
+    """声明进程 DPI 感知（三级回退），返回**实际生效**的级别名（供日志/测试）。
+
+    ★ 为什么不看 setter 的返回值判断成败：awareness 一旦被别处（清单 / Tk 自己）
+      定过，再 set 会返回 FALSE（ERROR_ACCESS_DENIED）。那时候进程其实**已经是**
+      aware 的，若据此认定"unaware"，下面的缩放就不会乘 dpi，球会小一圈。
+      所以一律 set 完再**回读** `_dpi_awareness_state()` 为准。
+    """
+    global _DPI_AWARENESS
+    if _DPI_AWARENESS is not None:
+        return _DPI_AWARENESS
+    if _dpi_awareness_state() == "unaware":
+        for fn in (
+            _set_pmv2,                                          # Win10 1607+ 最佳
+            lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0,   # Win8.1+
+            lambda: core.user32.SetProcessDPIAware(),           # Win7+ 兜底
+        ):
+            try:
+                if fn():
+                    break
+            except Exception:
+                pass
+    _DPI_AWARENESS = _dpi_awareness_state()
+    return _DPI_AWARENESS
+
+
+def dpi_ratio(hwnd=None):
+    """窗口所在显示器的缩放（dpi/96）。**唯一出口** —— 度量/渲染/摆位都乘它。
+
+    ★ 为什么按"窗口所在显示器"而不是"系统 DPI"：本机是 125%(主屏 1920 物理) +
+      100%(副屏 1920 物理) 的混合配置。声明 PER_MONITOR_AWARE_V2 之后，球被拖到
+      100% 那块屏上时必须把缩放收回到 1.0，否则会比设计大 25%（也就会比在
+      主屏上看着还大），两边不一致。
+    """
+    u = core.user32
+    try:
+        if hwnd:
+            d = u.GetDpiForWindow(wt.HWND(hwnd))
+            if d:
+                return d / 96.0
+    except Exception:
+        pass
+    try:
+        d = u.GetDpiForSystem()
+        if d:
+            return d / 96.0
+    except Exception:
+        pass
+    try:
+        hdc = u.GetDC(0)
+        d = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)      # LOGPIXELSX
+        u.ReleaseDC(0, hdc)
+        if d:
+            return d / 96.0
+    except Exception:
+        pass
+    return 1.0
+
+
+#   ★★ 这一行必须在 `tk.Tk()` **之前**跑（在窗口建出来之后再声明，只有新窗口生效、
+#      已建的那个还是虚拟化的 —— 正是当年"半 aware"导致坐标打架的由来）。
+#      放模块级是因为所有入口（main / 测试 / 探针）都从这里 import。
+_enable_dpi_awareness()
 
 user32 = core.user32
 
@@ -204,9 +314,39 @@ def ui_metrics(s=1.0):
         "pad_r": max(10, int(round(12 * s))),
         "fsz": max(7, int(round(10 * s))),
         "ssz": max(6, int(round(8 * s))),
-        "ring_inset": max(3, int(round(4 * s))),
+        "ring_inset": max(4, int(round(7 * s))),
         "bar_h": max(3, int(round(4 * s))),
+        # ★★ 自绘层用的字号（**像素**，不是 Tk 的点字号）—— 第二十三批。
+        #   为什么单列一组：旧版用 `tkfont.Font(size=10)`，那是 10 **点**，
+        #   在 96 DPI 下 = 13.33px；而新渲染层是按像素排版的。两者混用就会出现
+        #   "量宽按 13.33px、绘制按 13px"——差 2% 足够让最后一行字被窗口裁掉，
+        #   而这正是这个项目反复栽的那个坑（见 ui_layout 的注释）。
+        "ball_px": max(12, int(round(20 * s))),
+        "pct_px": max(10, int(round(16 * s))),
+        "disc_px": max(9, int(round(13 * s))),
+        "t_px": max(10, int(round(13 * s))),
+        "s_px": max(9, int(round(11 * s))),
     }
+
+
+LAY_KEYS = ("pad", "icon_d", "tx", "pad_r", "bar_h", "ring_inset")
+SIZE_KEYS = {"ball": "ball_px", "pct": "pct_px", "disc": "disc_px",
+             "title": "t_px", "sub": "s_px"}
+
+
+def ui_layout(s=1.0):
+    """`ui_render.render()` 要的两坨参数：**胶囊布局 + 字号**，全部来自 `ui_metrics`。
+
+    ★★ 为什么必须合成一个出口：这个项目**已经**栽过两次"同一份数写两遍"——
+      ① 第二十一批把胶囊布局从"小圆点、文字从 36px 起"改成"28px 图标位、文字从
+         47px 起"，`_fit_width()` 里还留着旧数 → 所有长文案被省略号吃掉关键一截；
+      ② 同一批里"量宽用 Tk 字体、绘制用另一套" → 算得下也画不下。
+      两次的后果一样：用户读不到该读的字。所以第三批（自绘）把规矩钉死：
+      **自绘层要的任何尺寸/字号只能从这里取**，别处再写字面量就是埋雷。
+    """
+    m = ui_metrics(s)
+    return ({k: m[k] for k in LAY_KEYS},
+            {k: m[mk] for k, mk in SIZE_KEYS.items()})
 
 
 def ease_out_cubic(t):
@@ -465,7 +605,13 @@ class Popup:
         · **不抢焦点** —— 弹通知时用户正在剪映里按键，抢焦点会把他的操作吃掉；
         · 卡片可以压在球**头顶**（用户要的"以小对话框形式在头顶浮现"），
           而不是把球本身撑大。
-    ★ 同样是"色键透明"，所以卡片是**圆角浮在桌面上**的，没有方形底板。
+    ★★ 第二十三批：卡片底图不再用 Tk Canvas 画，改成 `ui_render.render_card()`
+      渲染好的**整张位图**直接设成窗口外观（逐像素 alpha，同主窗）。
+      这样卡片才有真正的投影和抗锯齿圆角 —— Canvas 画出来的卡边是一圈硬阶梯，
+      在浅色背景上尤其廉价。
+    ★ 代价同样是"**窗口里不能有子控件**"：所以按钮的高亮/命中一律自己算矩形
+      （`ui_render.card_buttons()` 给的矩形和真正画的按钮**同源**），
+      事件直接绑在顶层窗上。
     """
 
     def __init__(self, master, w, h, radius=16, bg=SURFACE_HI):
@@ -473,31 +619,85 @@ class Popup:
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
         self.top.configure(bg=UI_KEY)
-        self._keyed = False
-        try:
-            self.top.attributes("-transparentcolor", UI_KEY)
-            self._keyed = True
-        except Exception:
-            pass
         self.w, self.h, self.r, self.bg = int(w), int(h), int(radius), bg
-        self.cv = tk.Canvas(self.top, width=self.w, height=self.h, bg=UI_KEY,
-                            highlightthickness=0, bd=0)
-        self.cv.pack(fill="both", expand=True)
-        self.bg_item = round_rect(self.cv, 1, 1, self.w - 1, self.h - 1, self.r,
-                                  fill=bg, outline=mix_hex(bg, "#ffffff", 0.10))
+        self._img = None
+        self._card_xy = None      # 卡片矩形左上角（屏幕坐标）
+        self._shown = 1.0
+        self._hwnd = None
+        # ★★ 「当前这张位图是谁画的」—— 内容规格（标题 / 正文行 / 哪个按钮高亮）。
+        #   为什么要有：改成整张位图上屏之后，卡片上**没有可读的 Canvas 图元**了
+        #   （`itemcget(txt,"text")` 那套断言全失效）。把"生成这张图的输入"记在
+        #   卡片上，测试就能断言**语义**（正文有没有被砍、悬停高亮到底切没切），
+        #   而不是去截图比对像素 —— 后者又脆又看不出对错。
+        self.spec = {}
 
-    def place(self, x, y):
+        # ★ 先摆到屏幕外：窗口建出来到第一次上屏之间会有一瞬间的"裸窗"，
+        #   摆在 0,0 就是屏幕左上角闪一下。移到 -32000 之外就绝对看不见。
+        P = _ur.pad_for(1.0)
         try:
-            self.top.geometry(f"{self.w}x{self.h}+{int(x)}+{int(y)}")
+            self.top.geometry(
+                f"{self.w + 2 * P}x{self.h + 2 * P}+-32000+-32000")
+            self.top.update_idletasks()
         except Exception:
             pass
+
+    def hwnd(self):
+        if self._hwnd is None:
+            self._hwnd = _ur.toplevel_hwnd(self.top)
+        return self._hwnd
+
+    def show(self, img, x, y, alpha=1.0, spec=None):
+        """一次性摆好 + 上屏。`x, y` = **卡片矩形**左上角（窗口再外扩投影留白）。
+
+        `spec` = 这张位图对应的内容规格（见 `self.spec` 的注释）。不传则沿用上一张
+        —— 入场动画只是在挪同一张图，规格没变。
+        """
+        self._img = img
+        self._shown = max(0.0, min(1.0, float(alpha)))
+        self._card_xy = (int(x), int(y))
+        if spec is not None:
+            self.spec = dict(spec)
+        self._blit_now()
+
+    def _blit_now(self):
+        """把当前位图（按当前透明度）推到窗口上。
+
+        ★ 位置和尺寸都由 `UpdateLayeredWindow` 一次设完 —— 不走 `geometry()`：
+          两个 API 都设位置的话，移动的瞬间会先按旧尺寸摆一次，肉眼是一下"抖"。
+        """
+        if self._img is None or self._card_xy is None:
+            return
+        P = _ur.pad_for(1.0)
+        x, y = self._card_xy
+        try:
+            self.top.update_idletasks()
+            _ur.blit(self.hwnd(), _ur.with_alpha(self._img, self._shown),
+                     int(x) - P, int(y) - P)
+        except Exception:
+            pass
+
+    def place(self, x, y, alpha=None):
+        """摆位置，可同时改透明度（入场动画一帧只需一次上屏）。"""
+        if self._img is None:
+            return
+        if alpha is not None:
+            self._shown = max(0.0, min(1.0, float(alpha)))
+        self._card_xy = (int(x), int(y))
+        self._blit_now()
 
     def alpha(self, v):
-        """整卡透明度（淡入淡出用）。拿不到 -alpha 就静默忽略（只影响观感，不影响功能）。"""
-        try:
-            self.top.attributes("-alpha", max(0.0, min(1.0, float(v))))
-        except Exception:
-            pass
+        """整卡透明度（淡入淡出用）。
+
+        ★★ 不能用 `top.attributes("-alpha", …)`：那个 API 走的是
+          `SetLayeredWindowAttributes`，和我们用的 `UpdateLayeredWindow`
+          **共用同一份分层窗口数据** —— 设下去会把位图顶掉（整卡变纯色块）。
+          所以透明度只能重画一遍位图；好在贵的那一遍有渲染缓存，
+          这里只是在 1x 小图上缩一道 alpha（几十微秒）。
+        """
+        if self._img is None or self._card_xy is None:
+            return
+        self._shown = max(0.0, min(1.0, float(v)))
+        self._blit_now()
 
     def lift(self):
         try:
@@ -508,16 +708,16 @@ class Popup:
     def destroy(self):
         """收窗：**先 withdraw 再 destroy**（第二十二批）。
 
-        ★ 为什么这么收：这张卡是无边框置顶窗，`-transparentcolor` 抠掉的部分是
-          "真透明"。这一组合（overrideredirect + 色键 + topmost）在 Windows 上
-          **有可能**被直接摧毁时触发不干净的桌面重绘，留下一点旧像素。
-          `withdraw()` 会让系统走一次正常的隐藏/重绘路径，再 destroy 就稳。
+        ★ 为什么这么收：这张卡是无边框置顶窗。`overrideredirect + topmost + 分层`
+          这一组合在 Windows 上**有可能**被直接摧毁时触发不干净的桌面重绘，
+          留下一点旧像素。`withdraw()` 会让系统走一次正常的隐藏/重绘路径，再
+          destroy 就稳。
         ★ 老实交代：我们最初以为 `ui_6_alert.png` 里那个 5x4 像素的小点**就是**
           这种残影，追了一圈才发现它是**被折行挤到单独一行的句号「。」**
           （居中排版 → 屏幕正中间孤零零一个点，放大看像个小圆环），
           真正的修法在 `wrap_lines()` 的禁则处理里。
-          也就是说：这一个 withdraw **不是**那个点的解药，只是防御性写法
-          （成本接近 0，且这个窗口组合确实有残影风险）—— 别把两件事记混。
+          也就是说：这一个 withdraw **不是**那个点的解药，只是防御性写法 ——
+          别把两件事记混。
         """
         try:
             self.top.withdraw()
@@ -806,21 +1006,41 @@ class Companion:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=UI_KEY)
-        # ★★ 第二十一批（2026-09-20 · 用户："悬浮球旁边还有丑陋的边框"）：
-        #   把窗口底色设成**色键**再让 Windows 抠掉它 —— 圆形/胶囊之外的像素
-        #   从此**真的透明**，不再有那个包着球的近黑色方块。
-        #   副作用是好的：被抠掉的区域**鼠标穿透**，方块本来会吃掉的那几次点击
-        #   现在能落到剪映上（旧版球周围的四个角是实心窗口，点了没反应）。
-        #   ★ 只在 Windows 上有这个属性；拿不到就静默退化成旧样子（不抛）。
-        self._layered = False
-        try:
-            self.root.attributes("-transparentcolor", UI_KEY)
-            self._layered = True
-        except Exception as _e:
-            print(f"[ui] 透明色键不可用（退化为实心底）：{_e}", flush=True)
+        # ★★ 第二十三批（用户："ui 还是丑，看着廉价"）：**弃用色键，改逐像素 alpha**。
+        #   上一批（第二十一批）用 `-transparentcolor` 把"包着球的近黑方块"抠掉了，
+        #   方向对，但色键这条路**天生做不到**下面这几样 —— 而它们恰恰就是
+        #   "廉价感"的本体：
+        #     · 形状边缘的抗锯齿：色键是二值的（要么全透明要么全不透明），
+        #       圆形边缘只能是一圈硬阶梯，放大截图能数出台阶（`_probe_edge.py` 实测）；
+        #     · 真正的投影：投影靠半透明像素，色键会把它和桌面混成一片脏粉；
+        #     · 半透明的悬停反馈 / 淡入淡出：同上。
+        #   现在改成 `UpdateLayeredWindow`（逐像素 alpha，见 `ui_render.blit`）：
+        #   整个控件在 4 倍画布上渲染 → 降采样 → 带高斯投影 → 整块上屏。
+        #   ★ 代价（必须记住，不然下次一定踩）：**窗口里不能有任何 Tk 子控件**——
+        #     Tk 的 Canvas 是**子窗口**，它会在我们的位图**上面**重画
+        #     （`_probe_layered.py` / `_probe_layered2.py` 实测被盖）。
+        #     所以 Canvas 没了，鼠标事件直接绑在顶层窗自己身上。
+        #   ★ 鼠标穿透：Windows 对分层窗口的规则是"**alpha 为 0 的地方放行**"
+        #     （实测 + MSDN），所以圆形/胶囊外面**照样点得穿**，和色键时代一样；
+        #     代价是投影那圈（alpha>0）会拦住点击 —— 所以留白收小到 7px。
+        self._layered = True         # 保留这个名字：外部逻辑仍用它判断"无边框透明"
 
         # —— 外观缩放 / 跟随（同生共死 · 同大共小）——
-        self._scale = 1.0
+        # ★★ 第二十四批：缩放拆成**两个因子**，`_scale` 是它们的积（= 生效缩放）。
+        #   · `_dpi`    = 显示器 dpi/96（125% 的主屏 = 1.25）—— 让位图按物理像素
+        #                 1:1 上屏（见文件头 DPI 段的推导）；
+        #   · `_scale_follow` = "跟随剪映窗口大小"那一档（0.85~1.25，见 `_maybe_rescale`）。
+        #   ★ 为什么拆开而不是各乘各的：`_maybe_rescale` 是拿"剪映窗口高 / 工作区高"
+        #     反推缩放的 —— 若判定里用含 dpi 的 `_scale`，它会以为"球怎么突然大了
+        #     25%"，然后**把自己反向调小**；球被拖到另一块屏（dpi 变了）时更会来回打架。
+        #     所以：判定/量化永远只在 `_scale_follow` 域里做，`_scale` 只作度量与渲染口径。
+        #   ★ 名字**不能**叫 `_follow` —— 那会和 33ms 跟随循环 `self._follow()` 撞名，
+        #     把方法覆盖成 float，`after(400, self._follow)` 直接 TypeError（踩过）。
+        self._dpi = dpi_ratio()
+        self._dpi_mon = 0            # 上次检查时窗口在哪块显示器（0 = 未知）
+        self._dpi_checked_at = time.time()
+        self._scale_follow = 1.0
+        self._scale = self._scale_follow * self._dpi
         # ★ 缩放防抖状态（第十一批）：钉住的参考高度 + 待确认的目标缩放
         self._ref_locked = None      # 已锁定的"工作区高"（见 stable_ref）
         self._cand_s = None          # 候选缩放（连续稳定 RESCALE_HOLD 秒才生效）
@@ -829,28 +1049,29 @@ class Companion:
         self._sub = self._idle_sub()
         self._jy_pid = 0            # 剪映主窗口所属 pid（判"剪映是否在前台"用）
         self.W, self.H, self.R = BASE_W, BASE_H, BASE_R
-        self.root.geometry(f"{self.W}x{self.H}+120+120")
-
-        self.cv = tk.Canvas(self.root, width=self.W, height=self.H, bg=UI_KEY,
-                            highlightthickness=0, bd=0)
-        self.cv.pack(fill="both", expand=True)
+        # ★ 投影留白：形状外面还要留这么多像素给投影。窗口矩形 = 形状 + 2*pad。
+        #   **摆位逻辑仍按"形状矩形"算**，上屏时整体外扩 pad（见 _win_xy）。
+        self._pad = _ur.pad_for(self._scale)
+        self.root.geometry(
+            f"{self.W + 2 * self._pad}x{self.H + 2 * self._pad}+120+120")
 
         self._build_ui()
 
         # ★ 第二十一批：左键改成"按下→拖动→松开"三段，**点击动作挪到松手时**才发。
         #   理由：用户要"可以自由拖动"，而拖动和点击共用左键 —— 必须等松手才知道
         #   这次到底是"点了一下"还是"拖着摆位"。阈值 5px（见 _on_drag）。
-        self.cv.bind("<ButtonPress-1>", self._on_press)
-        self.cv.bind("<B1-Motion>", self._on_drag)
-        self.cv.bind("<ButtonRelease-1>", self._on_release)
+        # ★ 第二十三批：事件从 Canvas 挪到顶层窗（没有 Canvas 了，见上面的注释）。
+        self.root.bind("<ButtonPress-1>", self._on_press)
+        self.root.bind("<B1-Motion>", self._on_drag)
+        self.root.bind("<ButtonRelease-1>", self._on_release)
         # ★ 第十二批：进出都走**一个方法**，因为悬停不只是改个底色 ——
         #   它还要把圆球长成胶囊（`_on_enter` → `_sync_expanded`）。
         #   离开**不当场收**（展开时窗口变宽，tk 会补一个假的 <Leave>，
         #   当场收起就成了"展开↔收起"自激抖动），只记时间戳交给 _pump 延迟判定。
         #   ★ 第二十一批：tk 事件之外**另加一层光标轮询**（_poll_hover），
         #     因为实测"鼠标碰到球没反应"——窗口被高频 geometry() 挪动时事件会丢。
-        self.cv.bind("<Enter>", self._on_enter)
-        self.cv.bind("<Leave>", self._on_leave)
+        self.root.bind("<Enter>", self._on_enter)
+        self.root.bind("<Leave>", self._on_leave)
 
         # ★ 菜单底色**不能**用色键（会整块透明看不见），所以单独给 MENU_BG。
         self.menu = tk.Menu(self.root, tearoff=0, bg=MENU_BG, fg=FG,
@@ -934,7 +1155,7 @@ class Companion:
         self.menu.add_separator()
         _add("quit", "退出", self._quit)
 
-        self.cv.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+        self.root.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
         self.root.update_idletasks()
         h = self.root.winfo_id()
@@ -944,7 +1165,14 @@ class Companion:
                 break
             h = p
         self.my_hwnd = h
-        print(f"[init] winfo_id={self.root.winfo_id()} top_hwnd={self.my_hwnd}", flush=True)
+        print(f"[init] winfo_id={self.root.winfo_id()} top_hwnd={self.my_hwnd}"
+              f" dpi-awareness={_DPI_AWARENESS} dpi={self._dpi:.2f}"
+              f" scale={self._scale:.3f}", flush=True)
+        # ★★ 补一次上屏（第二十三批 · 真踩到）：`_build_ui()` 排在解析 HWND
+        #    **之前**，那一次的 `_redraw → _blit` 因为 `my_hwnd is None` 只能跳过。
+        #    Canvas 版无所谓（画完就在那儿了），但"整窗位图"版不补这一枪，
+        #    启动后**球是空的** —— 要等用户碰一下或状态变一次才现身。
+        self._redraw()
 
         if self.cfg.get("launch_on_start", True) and not core.find_jianying(exclude=self.my_hwnd):
             self._launch_jy(silent=True)
@@ -985,12 +1213,12 @@ class Companion:
         return ball_label(self.state[0], self._pct)
 
     def _build_ui(self):
-        """按 self._scale 重建整个控件（尺寸 + 字号一起缩放），建完立刻 _redraw 一次。
+        """按 self._scale 重算整套度量，再重画一帧。
 
-        「同大共小」：跟着剪映窗口大小等比缩放，窗口变小/变大时不突兀。
-        ★ 第十二批：这里**同时**建好"圆球"和"横条"两套画布元素，
-          由 `_sync_expanded` / `_redraw` 决定谁露面 —— 切换只是改属性，
-          不重建元素，所以能做平滑形变（重建 = 闪一下 + z 序错乱）。
+        ★★ 第二十三批：这里**不再建任何画布元素**了 —— 整个控件由
+          `ui_render.render()` 每帧现画（带缓存），上屏走逐像素 alpha。
+          留下的只有"尺寸 / 字号 / 布局"这一组度量和动画状态 `_cur`
+          （`_redraw` 每帧读它们生成本帧画面，见 `_view_state`）。
         """
         s = self._scale
         self._ui_ready = False           # 重建期间不许播动画（尺寸是一次到位的）
@@ -998,84 +1226,29 @@ class Companion:
         self.R = max(6, int(round(BASE_R * s)))
         tw, tr = self._target_shape()
         self.W = max(BALL_MIN_W, int(round(tw)))
-        self.cv.configure(width=self.W, height=self.H)
-        self.cv.delete("all")
 
-        # —— 尺寸相关的度量统一算一次，_redraw 只管用 ——
-        #   ★ 第二十一批 · iOS 化：改成"图标位"布局 —— 最左边是一个**圆形图标**
-        #     （iOS 的通知行、设置行都是这个形态），文字从图标右侧起。
-        #     旧版是"一个 10px 小圆点 + 文字从 36px 起"，看着就是个粗糙的进度条。
-        #   ★★ 第二十二批：这组数**必须**来自 `ui_metrics()`（唯一出口）——
-        #     之前这里和 `_fit_width()` 各写一遍，改布局时只改了一边，
-        #     胶囊宽度就永远比文案少 13px（详见 ui_metrics 的注释）。
+        # —— 尺寸/字号/布局：一律来自 `ui_metrics()` 这一个出口 ——
+        #   ★ 项目历史上两次事故都是"同一份数写两遍"，见 ui_layout 的注释。
         _m = ui_metrics(s)
-        self._pad = _m["pad"]
+        self._pad = _ur.pad_for(s)       # 投影留白（窗口比形状大 2*_pad）
+        self._pad_l = _m["pad"]          # 胶囊内左右留白（★ 别和 _pad 混）
         self._icon_d = _m["icon_d"]
         self._tx = _m["tx"]
         self._pad_r = _m["pad_r"]
         self._fsz = _m["fsz"]
         self._ssz = _m["ssz"]
-        self._f = tkfont.Font(family=FONT_FAMILY, size=self._fsz)
-        self._fs = tkfont.Font(family=FONT_FAMILY, size=self._ssz)
-        self._fb = tkfont.Font(family=FONT_FAMILY, size=max(10, int(round(14 * s))))
-        self._ficon = tkfont.Font(family=FONT_FAMILY,
-                                  size=max(8, int(round(12 * s))), weight="bold")
-        self._ring_w = max(2, int(round(3 * s)))
         self._bar_h = _m["bar_h"]
-        self._bar_pad = self._pad
-
-        # 底图：胶囊 / 圆形（宽==高且圆角==高/2 时就是正圆）。
-        # ★ 动效只改它的**坐标**，不 delete/create —— 每帧重建会闪。
-        # ★★ 第二十一批（用户："悬浮球旁边还有丑陋的边框"）：描边从旧版那道
-        #    `#33353d` 中灰改成**贴着形状走的 1px 发丝高光**（亮度只比底色高 13%）。
-        #   更关键的是窗口底色已经是色键（会被抠成真透明），
-        #   圆球外面**不再有那个近黑色方块** —— 那才是"丑陋边框"的本体。
-        self.bg_item = round_rect(self.cv, 1, 1, self.W - 1, self.H - 1, self.R,
-                                  fill=SURFACE_SOLID,
-                                  outline=mix_hex(SURFACE_SOLID, "#ffffff", 0.13))
-
-        # —— 圆球套件：进度轨道 + 进度弧 + 中间那个字 ——
-        #   ★ 第二十一批：外圈从"贴着球的外缘"改成**内嵌**一圈（缩进 _ring_inset）。
-        #     贴着外缘画时，tk 的弧线是**从包围椭圆向外描边**的 ——
-        #     弧的一半会跑到球外面，看着像"球边上糊了一块橙色"（放大截图实测）。
-        #     缩进一环宽之后，弧完整落在圆内，才像 iOS 的环形进度。
-        self._ring_inset = max(3, int(round(4 * s)))
-        ri = self._ring_inset
-        self.ring_item = self.cv.create_oval(ri, ri, self.H - ri, self.H - ri,
-                                            outline=TRACK, width=self._ring_w,
-                                            state="hidden")
-        self.arc_item = self.cv.create_arc(ri, ri, self.H - ri, self.H - ri,
-                                          start=90, extent=0, style="arc",
-                                          outline=BUSY, width=self._ring_w,
-                                          state="hidden")
-        self.ball_item = self.cv.create_text(self.H / 2.0, self.H / 2.0,
-                                            text=self._ball_text(), fill=LABEL,
-                                            font=self._fb, state="hidden")
-
-        # —— 胶囊套件：圆形图标位 + 两行字 + 底部胶囊进度条 ——
-        pad, H = self._pad, self.H
-        id_ = self._icon_d
-        icy = H // 2
-        self.icon_bg_item = self.cv.create_oval(pad, icy - id_ // 2,
-                                                pad + id_, icy + id_ // 2,
-                                                fill=SURFACE, outline="", state="hidden")
-        self.icon_item = self.cv.create_text(pad + id_ / 2.0, icy,
-                                             text=pill_glyph(self.state[0]),
-                                             fill=FG_DIM, font=self._ficon,
-                                             state="hidden")
-        self.txt_item = self.cv.create_text(self._tx, H / 2 - max(4, int(round(7 * s))),
-                                            anchor="w", text=self._txt, fill=LABEL,
-                                            font=self._f, state="hidden")
-        self.sub_item = self.cv.create_text(self._tx, H / 2 + max(5, int(round(8 * s))),
-                                            anchor="w", text=self._sub, fill=LABEL2,
-                                            font=self._fs, state="hidden")
-        by0 = H - self._bar_h - max(3, int(round(4 * s)))
-        self.bar_track = round_rect(self.cv, pad, by0, self.W - pad,
-                                    by0 + self._bar_h, self._bar_h / 2.0,
-                                    fill=TRACK, outline="", state="hidden")
-        self.bar_fill = round_rect(self.cv, pad, by0, pad + 6,
-                                   by0 + self._bar_h, self._bar_h / 2.0,
-                                   fill=BUSY, outline="", state="hidden")
+        self._bar_pad = self._pad_l
+        # ★★ 文字度量与绘制**同一套字体、同一个字号**（都是 1x 像素）。
+        #   旧版这里建的是 `tkfont.Font(size=10)`（10 **点** ≈ 13.33px），而渲染层按
+        #   像素排版 —— "量宽 13.33px、画 13px"差 2%，足够让最后一行字被窗口裁掉。
+        #   `Metrics1x` 在 4 倍画布上量、再除回 1x，和真正绘制逐像素同源。
+        self._lay, self._sz = ui_layout(s)
+        self._t_px = self._sz["title"]
+        self._s_px = self._sz["sub"]
+        self._f = _ur.Metrics1x("reg", self._t_px)
+        self._fs = _ur.Metrics1x("reg", self._s_px)
+        self._card_m = _ur.card_metrics(s)     # 卡片布局口径（算高度、排版共用）
 
         # 动画状态：形状(宽/圆角)、悬停亮度、展开度(0=球 1=横条)、显示的百分比
         self._cur = {"w": float(self.W), "r": float(self.R),
@@ -1085,117 +1258,130 @@ class Companion:
         self._anims = {}
         # ★ 尺寸/圆角变了必须让**定位**重算，否则窗口还停在旧尺寸上（宽底图被裁）。
         #   这几个清空要放在 `_paint` **之前** —— `_paint` 里就会走一次
-        #   `_redraw → _apply_window_size`，那一次才是真正把新尺寸推给窗口的；
-        #   放在后面等于把它刚记下的 `_pushed_size` 抹掉，下一帧还要再推一遍。
+        #   `_redraw → _apply_window_size`，那一次才是真正把新尺寸推给窗口的。
         self._last_float = None
         self._last_rect = None
         self._pushed_size = None
         self._paint(self.state[0], dot=status_color(self.state[0]))
         self._ui_ready = True
 
+    # ------------------------------------------------------------ 这一帧该长什么样
+    def _view_state(self):
+        """把"这一帧该画成什么样"算成一个 dict —— **纯函数**（不碰窗口、不渲染）。
+
+        ★★ 为什么必须抽出来（第二十三批）：渲染从 Canvas 挪到 `ui_render` 之后，
+          "状态"以前是散在 `_redraw` 的一堆 `cv.itemconfigure` 里的 ——
+          测试只能靠"去 Canvas 里捞某个图元的属性"断言（`itemcget(txt_item,"text")`）。
+          Canvas 没了，如果状态只活在绘制调用里，测试就只剩"截图比对"一条路
+          （脆、且看不出语义）。抽成纯函数之后，"球里该显示什么字 / 进度条该不该在 /
+          现在是不是横条 / 文案有没有被省略号吃掉"都能直接断言，和渲染引擎无关。
+        """
+        cur = self._cur
+        s = self._scale
+        kind = self.state[0]
+        v = max(0.0, min(1.0, float(cur["fgv"])))
+        W = max(BALL_MIN_W, int(round(cur["w"])))
+        # ★ 圆角必须夹到"不超过半宽/半高"（第十二批踩到）：球态的圆角 = 直径/2，
+        #   若比实际的半宽还大，圆角矩形会退化成"两头鼓包"。夹一刀才是正圆。
+        R = max(4, min(int(round(cur["r"])), max(2, (W - 2) // 2),
+                       max(2, (self.H - 2) // 2)))
+        ball_a, pill_a = morph_alphas(v)
+        #   ★ 外圈**只**当 busy 时进度弧的暗色轨道，其余状态一律不画
+        #     （球自己已经有发丝边，再叠一圈灰环就是"双边框"）。
+        ring = (kind == "busy" and self._pct is not None and ball_a > 0.004)
+        avail = max(0, W - self._tx - self._pad_r)
+        pill = None
+        if pill_a > 0.004:
+            # ★ 每帧按**当前**宽度重算省略号：动画中间帧窗口还窄，
+            #   若直接塞最终文案会被窗口边界切掉（看着就是"字被裁了"）。
+            pill = {"glyph": pill_glyph(kind, self._pct),
+                    "title": ellipsize(self._f, self._txt, avail),
+                    "sub": ellipsize(self._fs, self._sub, avail),
+                    "bar": (None if self._pct is None
+                            else max(0.0, min(1.0, float(self._pct) / 100.0)))}
+        return {
+            "kind": kind, "scale": s,
+            "shape": (W, self.H, R), "morph": v,
+            "ball_a": ball_a, "pill_a": pill_a,
+            "hover": max(0.0, min(1.0, float(cur["bgv"]))),
+            # 球贴窗口哪一端：展开时窗口向左（或右）长出去，球那一端不许跑掉
+            "ball_x": (W - self.H) if self._ball_at_right() else 0,
+            "ball_text": (self._ball_text() if ball_a > 0.004 else None),
+            "ball_pct": (float(cur["pct"]) if ring else None),
+            "ring": ring,
+            "pill": pill,
+            "avail": avail,
+        }
+
     # ------------------------------------------------------------ 渲染 / 动效
     def _redraw(self):
-        """唯一的渲染出口：按当前动画状态画一遍，并把尺寸同步给窗口。
+        """唯一的渲染出口：把这一帧渲染出来 + 上屏，并把尺寸同步给窗口。
 
-        ★ 为什么必须"只有一个出口"（第十二批）：形变动画每一帧都要**同时**改
-          底图圆角、圆环/进度弧、两行文字、底部进度条、以及**窗口自身的大小**。
-          这些要是散在 _paint / _resize_to / _build_ui 里各改一部分，
-          动画中间帧必然出现"画布宽了、窗口没跟着宽 → 右边被裁"这种半成品。
+        ★ 为什么必须"只有一个出口"（第十二批的教训）：形变动画每一帧都要**同时**
+          改底图圆角、进度弧、两行文字、底部进度条、以及**窗口自身的大小**。
+          散在几处各改一部分，中间帧必然出现"画布宽了、窗口没跟着宽 → 右边被裁"。
+        ★★ 第二十三批：从"逐项 itemconfigure"改成"一次性渲染整帧"，反而更简单 ——
+          因为渲染层是个纯函数（输入全在 `_view_state()` 里），没有"改了一半"的中间态。
         """
         try:
-            cur, H = self._cur, self.H
-            W = self.W = max(BALL_MIN_W, int(round(cur["w"])))
-            # ★ 圆角必须夹到"不超过半宽/半高"（第十二批踩到）：
-            #   球态的圆角 = 直径/2（23），而底图多边形画在 (1,1)-(W-1,H-1)，
-            #   实际半宽只有 (46-2)/2 = 22 —— 圆角比它大 1px，
-            #   顶点序列里就会出现 `x1+r > x2-r` 的**反向**控制点，
-            #   smooth 样条一过就鼓出一个小包，圆球看着是"歪的"。
-            #   夹一刀就正圆了（且展开态的长横条完全不受影响）。
-            R = max(4, min(int(round(cur["r"])),
-                           max(2, (W - 2) // 2), max(2, (H - 2) // 2)))
-            self.R = R
-            v = max(0.0, min(1.0, float(cur["fgv"])))      # 0=纯球 1=纯横条
-            color = self._dot_color
-
-            # 底图：只改坐标（每帧 delete/create 会闪 + 打乱 z 序）
-            #   ★ 第二十一批：悬停不再是"把底色提亮一大截"（旧版 #22242b→#2b2e37，
-            #     肉眼看就是"整块变灰"），而是**轻微**抬亮 + 发丝线跟着亮一点，
-            #     更像 iOS 的 highlight 反馈。
-            self.cv.coords(self.bg_item, *round_pts(1, 1, W - 1, H - 1, R))
-            self.cv.itemconfigure(
-                self.bg_item,
-                fill=mix_hex(SURFACE_SOLID, SURFACE_HI, cur["bgv"] * 0.55),
-                outline=mix_hex(mix_hex(SURFACE_SOLID, "#ffffff", 0.13),
-                                "#ffffff", cur["bgv"] * 0.22))
-
-            # —— 球套件：0→0.45 **先**淡出 ——
-            bx = (W - H) if self._ball_at_right() else 0
-            ri = getattr(self, "_ring_inset", 4)
-            self.cv.coords(self.ring_item, bx + ri, ri, bx + H - ri, H - ri)
-            self.cv.coords(self.arc_item, bx + ri, ri, bx + H - ri, H - ri)
-            self.cv.coords(self.ball_item, bx + H / 2.0, H / 2.0)
-            # ★ 先出后进（第十二批目视验收）：球贴窗口**右端**（bx = W-H），
-            #   而展开时窗口是向左长出去的 —— 中途"窗口还不够宽"的那几帧里，
-            #   文字的右半截正好落在球那一块区域上。两边要是同时淡，会看到
-            #   "半个字叠在球上"的糊图。纯函数在 morph_alphas，test_guard[21]
-            #   守着"两者永不同时可见"这条不变量。
-            _ball_a, tin = morph_alphas(v)
-            _out = 1.0 - _ball_a
-            if _out >= 1.0:
-                for _it in (self.ring_item, self.arc_item, self.ball_item):
-                    self.cv.itemconfigure(_it, state="hidden")
-            else:
-                a = _ball_a
-                # ★ 第二十一批：旧的"外圈按状态分档"整套拿掉 ——
-                #   球自己已经有发丝边，再叠一圈灰环就是"双边框"（用户嫌丑的主因之一）。
-                #   现在外圈**只**当 busy 时进度弧的暗色轨道；其余状态一律藏着。
-                self.cv.itemconfigure(self.ball_item, state="normal",
-                                      text=self._ball_text(),
-                                      fill=mix_hex(SURFACE_SOLID, LABEL, a))
-                if self.state[0] == "busy" and self._pct is not None:
-                    self.cv.itemconfigure(self.ring_item, state="normal",
-                                          outline=mix_hex(SURFACE_SOLID, TRACK, a))
-                    ext = -360.0 * max(0.0, min(1.0, float(cur["pct"]) / 100.0))
-                    self.cv.itemconfigure(self.arc_item, state="normal", extent=ext,
-                                          outline=mix_hex(SURFACE_SOLID, color, a))
-                else:
-                    self.cv.itemconfigure(self.ring_item, state="hidden")
-                    self.cv.itemconfigure(self.arc_item, state="hidden")
-
-            # —— 胶囊套件：跟球错开的淡入（tin 上面已经算好）——
-            avail = max(0, W - self._tx - self._pad_r)
-            if tin <= 0.0:
-                for _it in (self.icon_bg_item, self.icon_item,
-                            self.txt_item, self.sub_item):
-                    self.cv.itemconfigure(_it, state="hidden")
-                self.cv.itemconfigure(self.bar_track, state="hidden")
-                self.cv.itemconfigure(self.bar_fill, state="hidden")
-            else:
-                # ★ 每帧按**当前**宽度重算省略号：动画中间帧窗口还窄，
-                #   若直接塞最终文案，会被窗口边界切掉（看着就是"字被裁了"）。
-                # ★ iOS 图标位：圆形底 = 强调色淡化到 22% 的 tint，字符用强调色。
-                self.cv.itemconfigure(self.icon_bg_item, state="normal",
-                                      fill=mix_hex(SURFACE_SOLID,
-                                                   mix_hex(SURFACE_SOLID, color, 0.22),
-                                                   tin))
-                #   ★ 第二十二批：图标位的内容也按 `_pct` 走 —— busy 时它就是
-                #     进度数字（跟球里那个数字同源），不再是**一个空色块**。
-                self.cv.itemconfigure(self.icon_item, state="normal",
-                                      text=pill_glyph(self.state[0], self._pct),
-                                      fill=mix_hex(SURFACE_SOLID, color, tin))
-                self.cv.itemconfigure(self.txt_item, state="normal",
-                                      text=ellipsize(self._f, self._txt, avail),
-                                      font=self._f, fill=mix_hex(SURFACE_SOLID, LABEL, tin))
-                self.cv.itemconfigure(self.sub_item, state="normal",
-                                      text=ellipsize(self._fs, self._sub, avail),
-                                      font=self._fs, fill=mix_hex(SURFACE_SOLID, LABEL2, tin))
-                self._paint_bar(color, alpha=tin)
-
+            st = self._view_state()
+            W, H, R = st["shape"]
+            self.W, self.R = W, R
+            pill = st["pill"]
+            img = _ur.render(
+                W, H, R, scale=st["scale"], kind=st["kind"],
+                glyph=(pill["glyph"] if pill else (st["ball_text"] or "")),
+                title=(pill["title"] if pill else ""),
+                sub=(pill["sub"] if pill else ""),
+                pct=st["ball_pct"],
+                bar=(pill["bar"] if pill else None),
+                ball_a=st["ball_a"], pill_a=st["pill_a"],
+                hover=st["hover"], ball_x=st["ball_x"],
+                layout=self._lay,
+                sizes={"title": self._t_px, "sub": self._s_px})
             self._apply_window_size()
+            self._blit(img)
         except Exception as e:
             if not getattr(self, "_redraw_err", False):
                 self._redraw_err = True
                 print(f"[ui] 重画异常 {e}", flush=True)
+
+    def _blit(self, img):
+        """把这帧位图推到窗口上（逐像素 alpha）。
+
+        ★ 位置**不由这里管**：`UpdateLayeredWindow` 的 `pptDst` 传 None 就是"位置不动"，
+          位置仍然归 `_float_position` / `_reposition`（它们按**形状**矩形算，
+          再整体外扩 `_pad`）。两个地方都设位置的话，动画中途就会互相打架。
+        ★★ `my_hwnd` 还没解析出来时**直接返回、不报错**（第二十三批踩到）：
+          `__init__` 里 `_build_ui()` 排在"解析顶层 HWND"**之前**，那一刻
+          `my_hwnd is None` → `UpdateLayeredWindow` 返回 0（err=1400 无效句柄）。
+          旧版不会暴露这件事（Canvas 画完就在那儿），换成"整窗位图"之后
+          **第一次上屏失败 = 启动后球是空的**（要等第一次悬停/状态变化才现身）。
+          所以：这里静默跳过，并在 `__init__` 拿到 HWND 之后立刻补一次 `_redraw()`。
+        ★ 真正的失败（拿不到 DC 之类的环境问题）只报一次：60fps 的循环不该刷满屏。
+        """
+        if not self.my_hwnd:
+            return
+        if not _ur.blit(self.my_hwnd, img, None, None):
+            if not getattr(self, "_blit_err", False):
+                self._blit_err = True
+                print("[ui] 分层上屏失败（UpdateLayeredWindow 返回 0）", flush=True)
+
+    # ------------------------------------------------------------ 窗口几何
+    #   ★★ 第二十三批：窗口矩形 = **形状矩形外扩 `_pad`**（投影留白）。
+    #      规矩：所有"摆位/夹取/拖动"的逻辑一律按**形状**矩形算（那是用户眼里
+    #      看到的东西的位置），只在**推给窗口的那一刻**外扩 `_pad`。
+    #      反过来做（让窗口矩形当形状矩形）就会连带把 corner_margin、hover 判定、
+    #      拖拽起点全改一遍，一处漏掉就是"球的位置慢慢漂移"。
+    def _win_wh(self):
+        """窗口尺寸（含投影留白）。"""
+        return self.W + 2 * self._pad, self.H + 2 * self._pad
+
+    def _push_geometry(self, x, y):
+        """把窗口摆到屏幕 (x, y) —— 注意传的是**形状左上角**。"""
+        P = self._pad
+        self.root.geometry(
+            f"{self.W + 2 * P}x{self.H + 2 * P}+{int(x) - P}+{int(y) - P}")
 
     def _apply_window_size(self):
         """尺寸**真的变了**才推给窗口（位置另有 33ms 的跟随循环在管）。
@@ -1343,7 +1529,8 @@ class Companion:
         self._ref_locked = ref
 
         # ---- 闸②③：档位死区 + 按时间确认（纯函数判定）----
-        act, s = rescale_verdict(jh, ref, self._scale, time.time(),
+        #   ★ 判定只在 `_follow` 域里做（不含 dpi）—— 理由见 __init__ 里那段注释。
+        act, s = rescale_verdict(jh, ref, self._scale_follow, time.time(),
                                  self._cand_s, self._cand_t0)
         if act == "skip":
             self._cand_s = None           # 回到"不用改" → 候选作废
@@ -1354,10 +1541,57 @@ class Companion:
             self._cand_s = s
             return
         self._cand_s = None
-        print(f"[float] 按钮随剪映缩放 {self._scale:.2f} -> {s:.2f}"
+        print(f"[float] 按钮随剪映缩放 {self._scale_follow:.2f} -> {s:.2f}"
               f"（剪映高 {jh} / 工作区 {ref}）", flush=True)
+        self._scale_follow = s
+        self._apply_scale()
+
+    # ------------------------------------------------------------ 缩放合成
+    def _apply_scale(self):
+        """两个缩放因子（跟随 / 显示器 dpi）任一变了 → 合成生效缩放并整窗重建。
+
+        ★ 为什么要有这个唯一出口：`_scale` 是**派生量**（= `_scale_follow * _dpi`），
+          `_build_ui()` 只认它。散在各处自己乘一遍，迟早出现"有人乘了 dpi、
+          有人没乘"——那就是又一次"同一份数写两遍"（本项目已栽过两次）。
+        """
+        s = self._scale_follow * self._dpi
+        if abs(s - self._scale) < 1e-9:
+            return
         self._scale = s
         self._build_ui()
+
+    def _sync_dpi(self):
+        """窗口挪到另一块显示器时，把缩放换成那块屏的 dpi 比例（≤2 次/秒）。
+
+        ★ 为什么必须做：本机是 125%（主屏）/ 100%（副屏）。声明 PER_MONITOR_AWARE_V2
+          之后 Windows **不再**替我们拉伸位图 —— dpi 变了就得自己把度量乘数换掉，
+          否则球被拖到副屏上会比设计**大 25%**（用户看到的就是"球突然变胖了"）。
+          用 `MonitorFromWindow` 的变化当触发器（比每帧查 dpi 便宜）。
+        """
+        if not self.my_hwnd:
+            return
+        now = time.time()
+        if now - self._dpi_checked_at < 0.5:
+            return
+        self._dpi_checked_at = now
+        try:
+            user32.MonitorFromWindow.restype = ctypes.c_void_p
+            user32.MonitorFromWindow.argtypes = [wt.HWND, ctypes.c_uint]
+            mon = int(user32.MonitorFromWindow(wt.HWND(self.my_hwnd), 2) or 0)
+        except Exception:
+            return
+        if not mon or mon == self._dpi_mon:
+            return
+        self._dpi_mon = mon
+        r = dpi_ratio(self.my_hwnd)
+        if abs(r - self._dpi) < 1e-6:
+            return
+        print(f"[ui] 换显示器：dpi 缩放 {self._dpi:.2f} -> {r:.2f}", flush=True)
+        self._dpi = r
+        #   dpi 一变，形状/窗口尺寸全变 → 位置缓存必须清掉，否则窗口停在旧尺寸上被裁
+        self._last_float = None
+        self._last_rect = None
+        self._apply_scale()
 
     # ------------------------------------------------------------ 嵌入
     def _try_embed(self):
@@ -1404,8 +1638,10 @@ class Companion:
         x, y = corner_xy(self.corner, (0, 0, cw, ch), self.W, self.H,
                          int(self.cfg.get("corner_margin", 14)),
                          int(self.cfg.get("top_gap", 92)))
-        user32.SetWindowPos(self.my_hwnd, HWND_TOP, int(x), int(y), self.W, self.H,
-                            SWP_NOACTIVATE)
+        # 形状坐标 → 窗口坐标（外扩投影留白，见 _win_wh）
+        P = self._pad
+        user32.SetWindowPos(self.my_hwnd, HWND_TOP, int(x) - P, int(y) - P,
+                            self.W + 2 * P, self.H + 2 * P, SWP_NOACTIVATE)
 
     def _detach(self):
         """剪映没了：重启自身，回到独立模式重新找宿主"""
@@ -1470,13 +1706,18 @@ class Companion:
         base = max(150, int(round(BASE_W * s)))
         hard = int(round(base * UI_MAX_GROW))
         tx, pad_r = m["tx"], m["pad_r"]
-        fsz, ssz = m["fsz"], m["ssz"]
-        f = tkfont.Font(family=FONT_FAMILY, size=fsz)
-        fs = tkfont.Font(family=FONT_FAMILY, size=ssz)
+        # ★★ 第二十三批：字号从 Tk 的**点**改成自绘的**像素**，量宽用 `Metrics1x`
+        #   —— 它和真正绘制走同一条 FreeType 路径（4 倍画布上量、再除回 1x），
+        #   所以"这里说放得下"就等于"画出来真的放得下"。
+        #   旧版这里是 `tkfont.Font(size=10)`（≈13.33px），而绘制按 13px，
+        #   差的那 2% 就是"最后一行字被窗口裁掉"的根因。
+        tpx, spx = m["t_px"], m["s_px"]
+        f = _ur.Metrics1x("reg", tpx)
+        fs = _ur.Metrics1x("reg", spx)
         need = max(f.measure(self._txt), fs.measure(self._sub)) + tx + pad_r
-        while need > hard and fsz > 7:            # ② 降主文案字号
-            fsz -= 1
-            f = tkfont.Font(family=FONT_FAMILY, size=fsz)
+        while need > hard and tpx > 9:            # ② 降主文案字号（1px 一级）
+            tpx -= 1
+            f = _ur.Metrics1x("reg", tpx)
             need = max(f.measure(self._txt), fs.measure(self._sub)) + tx + pad_r
         want = min(hard, max(base, int(math.ceil(need / float(UI_GROW_STEP))) * UI_GROW_STEP))
         # ★ 比的是"横条当前该多宽"（self._pill_w），不是窗口宽度 ——
@@ -1491,6 +1732,7 @@ class Companion:
         self._booted = True
         self._resize_to(want)
         self._f, self._fs = f, fs
+        self._t_px, self._s_px = tpx, spx
         cur_w = max(base, int(self._pill_w or base))
         avail = cur_w - tx - pad_r
         return (ellipsize(f, self._txt, avail), ellipsize(fs, self._sub, avail))
@@ -1518,40 +1760,6 @@ class Companion:
         else:
             self._cur["pct"] = float(self._pct)
         self._redraw()
-
-    def _paint_bar(self, color, alpha=1.0):
-        """画/藏底部那条**胶囊**进度条。self._pct 为 None = 不在跑 → 藏起来。
-
-        `alpha`（0~1）用于随着"球→胶囊"的淡入一起出现，免得刚长出来就闪一条实心条。
-        ★ 第二十一批：从直角矩形改成**胶囊**（两端半圆）—— 旧版那条方头进度条
-          在圆角胶囊里特别突兀（用户说的"僵硬"有一半来自它）。
-          短进度也要保持胶囊形（否则 frac 很小时退化成一条竖缝）。
-        """
-        try:
-            if self._pct is None or alpha <= 0.0:
-                self.cv.itemconfigure(self.bar_track, state="hidden")
-                self.cv.itemconfigure(self.bar_fill, state="hidden")
-                return
-            bh = self._bar_h
-            r = bh / 2.0
-            pad = self._bar_pad
-            by0 = self.H - bh - max(3, int(round(4 * self._scale)))
-            frac = min(1.0, max(0.0, float(self._pct) / 100.0))
-            fw = (self.W - 2 * pad) * frac
-            self.cv.coords(self.bar_track,
-                           *round_pts(pad, by0, self.W - pad, by0 + bh, r))
-            self.cv.itemconfigure(self.bar_track, state="normal",
-                                  fill=mix_hex(SURFACE_SOLID, TRACK, alpha))
-            if fw < 2:
-                self.cv.itemconfigure(self.bar_fill, state="hidden")
-            else:
-                fw = max(fw, float(bh))
-                self.cv.coords(self.bar_fill,
-                               *round_pts(pad, by0, pad + fw, by0 + bh, r))
-                self.cv.itemconfigure(self.bar_fill, state="normal",
-                                      fill=mix_hex(SURFACE_SOLID, color, alpha))
-        except Exception:
-            pass
 
     def set_state(self, kind, text, sub=None, hold=0, pct=None, step=None):
         self.state = (kind, text)
@@ -1617,61 +1825,55 @@ class Companion:
           跟桌面风格割裂），正是用户说"ui 设计可以抄一下 iPhone"要换掉的东西。
         ★ 为什么必须"同一时刻只有一张"：流程里连续几步都可能报消息，
           叠成通知墙比不通知更烦；新的顶掉旧的，用户永远只看最新那条。
-        ★★ 2026-09-20 第二十二批：正文从**单行 ellipsize** 改成**折行 + 按行数定高**。
+        ★★ 第二十二批：正文从**单行 ellipsize** 改成**折行 + 按行数定高**。
           旧实现固定 64 高、单行、放不下就砍 —— 实测「左键点球 → 还原草稿（回到预合…」
-          把**要用户做的事**砍掉了半句，等于没通知。现在按 `wrap_lines()` 折行、
-          高度跟着行数涨（最多 3 行，超出在最后一行收省略号）。
+          把**要用户做的事**砍掉了半句，等于没通知。
+        ★★ 第二十三批：整张卡改由 `ui_render.render_card()` 渲染（真投影 + 抗锯齿圆角），
+          高度也改成读 `ui_render.card_metrics()` 的行高 —— **和排版读同一份数**，
+          否则"折了 3 行该多高"会有两套算法，差 1px 就让最后一行贴到卡边。
         """
         try:
             self._drop_card()
             # ★ 星号剥在这一个出口里做完（和 ask_yes / show_info 同一条规矩）：
             #   自绘卡片不像 messagebox 会自己消化标记，不剥的话用户会看到 ** 本身。
             title, msg = md_plain(title), md_plain(msg)
-            f_t = tkfont.Font(family=FONT_FAMILY, size=11, weight="bold")
-            f_m = tkfont.Font(family=FONT_FAMILY, size=9)
-            f_i = tkfont.Font(family=FONT_FAMILY, size=12, weight="bold")
-            pad, id_ = 14, 28
-            tx = pad + id_ + 10
+            s = self._scale
+            cm = _ur.card_metrics(s)
+            S = _ur.default_card_sizes(s)
+            f_t = _ur.Metrics1x("bold", S["title"])
+            f_b = _ur.Metrics1x("reg", S["body"])
             w = self.CARD_W
-            avail = w - tx - pad
+            avail = w - cm["tx"] - cm["pad"]
             # —— 先量文字、再定高（高度是**结果**，不是写死的常数）——
             title = ellipsize(f_t, title, avail)
-            lines = wrap_lines(f_m, msg, avail) if msg else []
+            lines = wrap_lines(f_b, msg, avail) if msg else []
             if len(lines) > self.CARD_BODY_MAXLINES:
                 keep = self.CARD_BODY_MAXLINES
                 lines = lines[:keep - 1] + [
-                    ellipsize(f_m, "".join(lines[keep - 1:]), avail)]
-            t_h, l_h, gap = f_t.metrics("linespace"), f_m.metrics("linespace"), 2
-            body_h = len(lines) * l_h
-            block = t_h + ((gap + body_h) if lines else 0)
-            h = max(id_ + 2 * pad, block + 2 * pad)
+                    ellipsize(f_b, "".join(lines[keep - 1:]), avail)]
+            gap = 6
+            block = cm["t_h"] + (len(lines) * cm["l_h"] + gap if lines else 0)
+            h = max(cm["icon_d"] + 2 * cm["pad"], block + 2 * cm["pad"])
             card = Popup(self.root, w, h, radius=16, bg=SURFACE_HI)
-            color = status_color(kind)
-            icy = h // 2
-            card.cv.create_oval(pad, icy - id_ // 2, pad + id_, icy + id_ // 2,
-                                fill=mix_hex(SURFACE_HI, color, 0.24), outline="")
-            card.cv.create_text(pad + id_ / 2.0, icy,
-                                text=pill_glyph(kind, self._pct), fill=color, font=f_i)
-            # 文字块**整块垂直居中**（只用 title 居中会让"有正文/没正文"两种卡
-            # 的文字基线跳来跳去，看着像两个不同的控件）
-            y0 = (h - block) / 2.0
-            card.cv.create_text(tx, y0 + t_h / 2.0, anchor="w",
-                                text=title, fill=LABEL, font=f_t)
-            if lines:
-                card.cv.create_text(tx, y0 + t_h + gap, anchor="nw",
-                                    text="\n".join(lines), fill=LABEL2, font=f_m)
+            img = _ur.render_card(
+                w, h, 16, scale=s, kind=kind,
+                glyph=pill_glyph(kind, self._pct),
+                title=title, lines=lines, sizes=S)
             x, y = self._card_anchor(w, h)
-            card.place(x, y - 6)              # 起点略高 = 往下滑一点点（入场方向）
-            card.alpha(0.0)
+            card.show(img, x, y - 6, 0.0,     # 起点略高 = 往下滑一点点（入场方向）
+                      spec={"kind": kind, "title": title, "lines": list(lines),
+                            "glyph": pill_glyph(kind, self._pct),
+                            "buttons": None, "hot": None})
             card.lift()
             self._card = card
             # 入场：120ms 内滑到位置 + 淡入（用 tk 的 after 链，别为它开线程）
             steps = [0.45, 0.8, 1.0]
             for i, a in enumerate(steps):
-                self.root.after(30 * (i + 1), lambda a=a, i=i: self._card_slide(card, x, y, a, i))
+                self.root.after(30 * (i + 1),
+                                lambda a=a, x=x, y=y: self._card_slide(card, x, y, a, i))
             if hold:
                 self.root.after(int(hold * 1000), lambda c=card: self._card_out(c))
-            card.cv.bind("<Button-1>", lambda _e, c=card: self._card_out(c))
+            card.top.bind("<Button-1>", lambda _e, c=card: self._card_out(c))
         except Exception as e:
             print(f"[ui] 通知卡片失败，退回系统提示: {type(e).__name__}: {e}", flush=True)
             try:
@@ -1684,8 +1886,7 @@ class Companion:
         if card is not getattr(self, "_card", None):
             return
         try:
-            card.place(x, y - int(round(6 * (1.0 - a))))
-            card.alpha(a)
+            card.place(x, y - int(round(6 * (1.0 - a))), alpha=a)
         except Exception:
             pass
 
@@ -1695,8 +1896,7 @@ class Companion:
             return
         self._card = None
         for i, a in enumerate((0.7, 0.35, 0.0)):
-            self.root.after(26 * (i + 1),
-                            lambda a=a: (card.alpha(a), None)[1])
+            self.root.after(26 * (i + 1), lambda a=a: card.alpha(a))
         self.root.after(110, card.destroy)
 
     def ask_confirm(self, title, msg, ok_label="开始", no_label="取消", kind="ask"):
@@ -1708,100 +1908,93 @@ class Companion:
           期间的动画/跟随照常跑，界面不会冻住。
         ★ 卡片建不出来（极端情况）→ **退回 `ask_yes`**：宁可弹个丑的系统框，
           也绝不"问都不问就开跑"。
+        ★★ 第二十三批：底图从 Tk Canvas 改成 `ui_render.render_card()` 的整张位图
+          （逐像素 alpha，真投影 + 抗锯齿圆角）。
+          代价与通知卡相同：**窗口里不能有子控件**，所以
+            · 按钮悬停高亮 = **重画一遍位图**（带 hot 标记的那版；贵的那一遍有
+              渲染缓存，同一组 hot 组合只算一次，来回划鼠标只命中 3 张缓存图）；
+            · 点击命中 = 向 `ui_render.card_buttons()` 要矩形 —— 和真正画出来的
+              按钮**同一个函数算的**，不会出现"看到按钮在这儿、点下去没反应"。
+        ★ 高度依旧是**先量文字再定**：正文折了几行、卡片就多高，不留空档也不裁字。
         """
         try:
             self._drop_card()
             # ★ 星号剥在这个**唯一出口**里做完（同 ask_yes / show_info 的规矩）。
             title, msg = md_plain(title), md_plain(msg)
-            f_t = tkfont.Font(family=FONT_FAMILY, size=12, weight="bold")
-            f_m = tkfont.Font(family=FONT_FAMILY, size=9)
-            f_b = tkfont.Font(family=FONT_FAMILY, size=11)
+            s = self._scale
+            cm = _ur.card_metrics(s)
+            S = _ur.default_card_sizes(s)
+            f_m = _ur.Metrics1x("reg", S["body"])
             w = 284
-            pad = 18
-            lines = wrap_lines(f_m, msg, w - 2 * pad)
-            btn_h = 42
-            head = 40
-            body_h = len(lines) * f_m.metrics("linespace")   # 行高问字体要，别写死
-            h = head + body_h + 14 + btn_h
-            color = status_color(kind)
-            radius = 14                                  # 卡片圆角（按钮高亮要对齐它）
+            avail = w - cm["tx"] - cm["pad"]
+            # 标题也走同一套度量：太长就省略，别让一个长标题把卡片撑破
+            title = ellipsize(_ur.Metrics1x("bold", S["title"]), title, avail)
+            lines = wrap_lines(f_m, msg, avail) if msg else []
+            block = cm["t_h"] + (len(lines) * cm["l_h"] + 6 if lines else 0)
+            btn_h = int(round(_ur.CARD_BTN_H * s))
+            # 文字区在"卡片高 − 按钮行"里居中（`_do_card` 就是这么摆的），
+            # 所以高度 = 文字区 + 按钮行，两边读的是同一份度量。
+            h = max(cm["icon_d"] + 2 * cm["pad"], block + 2 * cm["pad"]) + btn_h
+            radius = 16                                  # 卡片圆角（按钮高亮要对齐它）
             card = Popup(self.root, w, h, radius=radius, bg=SURFACE_HI)
-            by0 = h - btn_h
-            card.cv.create_text(w / 2.0, 22, text=title, fill=LABEL, font=f_t)
-            # ★ 正文用**一个多行文本项**（justify=center）：一行一个 text 项的话
-            #   行距要自己猜，而且各行宽度不同时左边缘会参差；交给 tk 排版更整齐。
-            card.cv.create_text(w / 2.0, head, anchor="n", text="\n".join(lines),
-                                fill=LABEL2, font=f_m, justify="center")
-            card.cv.create_line(pad - 6, by0, w - pad + 6, by0,
-                                fill=HAIRLINE)
-            card.cv.create_line(w / 2.0, by0, w / 2.0, h,
-                                fill=HAIRLINE)
-            # —— 两个按钮 ——
-            # ★★ 2026-09-20 第二十二批（修第二十一批的按钮 bug）：旧实现把
-            #    **矩形 + 文字**塞进同一个画布 tag，然后靠"给这个 tag 统一设 fill"
-            #    来做悬停 —— 于是：
-            #      ① 鼠标碰上来时**文字**被一起刷成半透明淡色 → 按钮字反而更糊；
-            #      ② 移开时被一起设成**空 fill** → 文字拿到 tk 的默认色，
-            #         深色卡片上直接变成黑字/看不见（鼠标划过去一次就中招）；
-            #      ③ 光标在"矩形"和"文字"之间移动时，两个**同 tag** 的元素会互相
-            #         触发 Leave→Enter，高亮反复闪。
-            #    正解：底色高亮只画在**矩形**上（用 `round_pts_corners` 让下方两角
-            #    跟着卡片走圆角，免得高亮戳出卡片外），文字颜色**永远显式给值**；
-            #    悬停/点击统一按**坐标**判定（顺带把整块按钮区都变成热区，
-            #    不用精确点在那几个字上）。
-            r_c = radius                                # 按钮高亮下方两角跟着卡片走
-            card.cv.create_polygon(
-                round_pts_corners(0, by0 + 1, w / 2.0, h, rbl=r_c),
-                fill="", outline="", tags=("no_bg",))
-            card.cv.create_polygon(
-                round_pts_corners(w / 2.0, by0 + 1, w, h, rbr=r_c),
-                fill="", outline="", tags=("ok_bg",))
-            card.cv.create_text(w / 4.0, by0 + btn_h / 2.0, text=no_label,
-                                fill=LABEL, font=f_b)
-            card.cv.create_text(w * 3 / 4.0, by0 + btn_h / 2.0, text=ok_label,
-                                fill=color, font=f_b)
+            color = status_color(kind)
+            rects = _ur.card_buttons(w, h, radius, s, n=2)   # ← 命中矩形（窗口坐标）
+            x, y = self._card_anchor(w, h)
             ans = {"v": False}
             hl = {"now": None}
+
+            def _paint(which):
+                """把卡片（含当前哪个按钮被悬停）重画一遍并上屏。
+
+                ★ 只重画**按钮行**的形状变了，但整张卡是一张位图 —— 没法局部更新。
+                  靠 `render_card` 的缓存放住成本：hot 组合只有 3 种，
+                  划一次鼠标最多算 3 张，之后全命中缓存（1x 上屏几十微秒）。
+                """
+                btns = [(no_label, which == "no", None),
+                        (ok_label, which == "ok", color)]
+                img = _ur.render_card(w, h, radius, scale=s, kind=kind,
+                                      glyph=pill_glyph(kind, self._pct),
+                                      title=title, lines=lines,
+                                      buttons=btns, sizes=S)
+                card.show(img, x, y,
+                          spec={"kind": kind, "title": title, "lines": list(lines),
+                                "glyph": pill_glyph(kind, self._pct),
+                                "buttons": [no_label, ok_label],
+                                "hot": which})
 
             def pick(v):
                 ans["v"] = v
                 card.destroy()
 
-            def _which(x, y):
+            def _which(e):
                 """坐标 → 命中的按钮（None = 没在按钮上）。热区就是整块按钮区。"""
-                if y < by0:
-                    return None
-                return "no" if x < w / 2.0 else "ok"
+                for i, (rx0, ry0, rx1, ry1) in enumerate(rects):
+                    if rx0 <= e.x < rx1 and ry0 <= e.y < ry1:
+                        return "no" if i == 0 else "ok"
+                return None
 
             def _set_hl(which):
                 if which == hl["now"]:
                     return
                 hl["now"] = which
-                card.cv.itemconfigure(
-                    "ok_bg",
-                    fill=mix_hex(SURFACE_HI, color, 0.16) if which == "ok" else "")
-                card.cv.itemconfigure(
-                    "no_bg",
-                    fill=mix_hex(SURFACE_HI, "#ffffff", 0.10) if which == "no" else "")
+                _paint(which)
 
             def _motion(e):
-                _set_hl(_which(e.x, e.y))
+                _set_hl(_which(e))
 
             def _click(e):
-                got = _which(e.x, e.y)
+                got = _which(e)
                 if got:
                     pick(got == "ok")
 
-            card.cv.bind("<Motion>", _motion)
-            card.cv.bind("<Leave>", lambda _e: _set_hl(None))
-            card.cv.bind("<Button-1>", _click)
-            card.top.bind("<Escape>", lambda _e: pick(False))
-            card.top.bind("<Return>", lambda _e: pick(True))
-            x, y = self._card_anchor(w, h)
-            card.place(x, y)
-            card.alpha(1.0)
+            _paint(None)
             card.lift()
             self._card = card
+            card.top.bind("<Motion>", _motion)
+            card.top.bind("<Leave>", lambda _e: _set_hl(None))
+            card.top.bind("<Button-1>", _click)
+            card.top.bind("<Escape>", lambda _e: pick(False))
+            card.top.bind("<Return>", lambda _e: pick(True))
             try:
                 card.top.focus_force()
             except Exception:
@@ -1866,7 +2059,9 @@ class Companion:
             return
         self._dragging = True
         try:
-            self.root.geometry(f"{self.W}x{self.H}+{p[2] + dx}+{p[3] + dy}")
+            # p[2]/p[3] 记的是**窗口**左上角（winfo_x/y），所以这里直接用窗口尺寸
+            _w, _h = self._win_wh()
+            self.root.geometry(f"{_w}x{_h}+{p[2] + dx}+{p[3] + dy}")
         except Exception:
             pass
 
@@ -1880,11 +2075,16 @@ class Companion:
             self._click(e)
             return
         try:
-            x, y = int(self.root.winfo_x()), int(self.root.winfo_y())
+            # ★ 退回**形状坐标**：cfg["float_xy"] 里一直存的是形状位置
+            #   （`_float_position` 会再外扩 _pad），存窗口坐标会让球每次启动
+            #   往左上跳 _pad。
+            P = self._pad
+            x = int(self.root.winfo_x()) + P
+            y = int(self.root.winfo_y()) + P
             wa = core.monitor_work_area(self.my_hwnd)
             if wa:
                 x, y = clamp_box(x, y, self.W, self.H, wa)
-                self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+                self._push_geometry(x, y)
             # ★ 用户自己摆过了 → 从此**不再**被角落吸附拉回去（那会让人觉得"摆了没用"）
             self.cfg["float_xy"] = [x, y]
             self.cfg["pos_custom"] = True
@@ -2577,7 +2777,7 @@ class Companion:
             pos = (int(x), int(y))
             if force or pos != getattr(self, "_last_float", None):
                 self._last_float = pos
-                self.root.geometry(f"{self.W}x{self.H}+{pos[0]}+{pos[1]}")
+                self._push_geometry(pos[0], pos[1])
         except Exception as e:
             if not getattr(self, "_float_err_shown", False):
                 self._float_err_shown = True
@@ -2644,6 +2844,10 @@ class Companion:
         """
         try:
             self._poll_hover()      # ★ 悬停兜底（事件会丢，光标位置不会骗人）
+        except Exception:
+            pass
+        try:
+            self._sync_dpi()        # ★ 换显示器 → 换 dpi 缩放（≤2 次/秒，很便宜）
         except Exception:
             pass
         try:

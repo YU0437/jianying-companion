@@ -44,6 +44,25 @@ def check(name, got, want):
         fails.append(name)
 
 
+def code_of(fn):
+    """取函数源码，但**去掉 docstring** —— 用来做"不许出现某个调用"这类断言。
+
+    ★ 为什么需要它（第二十三批真踩到）：这个项目的注释风格是"把踩过的坑写清楚"，
+      于是 docstring 里经常出现**反例**，比如 `Popup.alpha` 的 docstring 写着
+      「★ 不能用 `top.attributes("-alpha", …)`」。直接对源码做子串匹配，
+      这段"教你别这么写"的说明反而会把断言判红 —— 那是在惩罚好注释。
+    """
+    src = _inspect.getsource(fn)
+    for q in ('"""', "'''"):
+        a = src.find(q)
+        if a < 0:
+            continue
+        b = src.find(q, a + 3)
+        if b > a:
+            return src[:a] + src[b + 3:]
+    return src
+
+
 # ---- A1. 本次 bug 的最小复现：广告弹窗被旧版本学成了"会员弹窗" ----
 POLLUTED = [{"title": "JianyingPro", "w": 616, "h": 500}]
 
@@ -1339,9 +1358,10 @@ check("④-3 横条比球还窄时取球径兜底（不许出负宽/零宽）",
 check("④-4 形变两端都是合法尺寸（不会算出 0 宽）",
       all(gui.morph_shape(e, 232.0, 46.0, 14.0)[0] >= 46.0 for e in (True, False)), True)
 _src_rd = _inspect.getsource(gui.Companion._redraw)
+_src_vs = _inspect.getsource(gui.Companion._view_state)
 check("④-5 ★ 圆角被夹到不超过半宽/半高（回归：球态圆角 23 > 实际半宽 22，"
-      "顶点序列里会出现反向控制点，圆球看着是歪的）",
-      "(W - 2) // 2" in _src_rd and "(H - 2) // 2" in _src_rd, True)
+      "圆角矩形会退化成两头鼓包，圆球看着是歪的）",
+      _src_vs.count("- 2) // 2") >= 2, True)
 
 # ---- ⑤ 缓动 / 颜色插值（"加点流畅样式"的实际实现）----
 check("⑤-1 缓动端点：e(0)=0 e(1)=1", (gui.ease_out_cubic(0), gui.ease_out_cubic(1)), (0.0, 1.0))
@@ -1373,14 +1393,155 @@ check("⑥-2 `_paint` 确实把渲染交给了 `_redraw`", "_redraw()" in _src_p
 check("⑥-3 `_paint` 确实先定形态（球/横条）再画", "_sync_expanded(" in _src_paint, True)
 check("⑥-4 `_redraw` 是全模块唯一更新窗口尺寸的地方（宽度/圆角/淡入都在它里面收口）",
       sum("_apply_window_size" in _inspect.getsource(f)
-          for f in (gui.Companion._redraw, gui.Companion._build_ui, gui.Companion._resize_to,
-                    gui.Companion._paint, gui.Companion._paint_bar)) >= 1, True)
-check("⑥-5 `_redraw` 里对底图只改坐标、不重建元素（每帧重建会闪 + 打乱 z 序）",
-      "coords(self.bg_item" in _src_rd and "create_polygon" not in _src_rd, True)
+          for f in (gui.Companion._redraw, gui.Companion._build_ui,
+                    gui.Companion._resize_to, gui.Companion._paint)) >= 1, True)
+check("⑥-5 ★★ `_redraw` 里不再**重建**任何画布元素（每帧重建会闪 + 打乱 z 序）；"
+      "整帧渲染只走 `ui_render.render` → `_blit` 一条路",
+      ("coords(self.bg_item" not in _src_rd and "create_polygon" not in _src_rd
+       and "self.bg_item" not in _src_rd
+       and "_ur.render(" in _src_rd and "self._blit(" in _src_rd), True)
 check("⑥-6 形态补间是**分通道**的（否则每秒一次的进度更新会把形变动画反复掐断）",
       "def _anim_begin(self, chan" in _inspect.getsource(gui.Companion._anim_begin), True)
 check("⑥-7 分通道后仍只有一个 tick 循环（不许每个通道各排一个 after）",
       _inspect.getsource(gui.Companion).count("after(ANIM_FRAME_MS"), 1)
+
+# ---- ⑥a 启动首帧（第二十三批 · 真踩到的一个"球是空的"）----
+#   `__init__` 里 `_build_ui()` 排在"解析顶层 HWND"**之前**，那一刻 `my_hwnd is None`
+#   → `UpdateLayeredWindow` 返回 0（err=1400 无效句柄）。Canvas 版不会暴露这件事
+#   （画完就在那儿了），但"整窗位图"版**第一次上屏失败就等于启动后球是空的**
+#   —— 要等用户碰一下或状态变一次才现身。
+#   两道修法缺一不可：① 没 HWND 时静默跳过（别报假失败）；② 拿到 HWND 立刻补一帧。
+_src_blit = code_of(gui.Companion._blit)
+check("⑥a-1 ★ `_blit` 在 `my_hwnd` 还没解析出来时**静默跳过**（那不是真失败）",
+      "if not self.my_hwnd:" in _src_blit and "return" in _src_blit, True)
+_src_init = code_of(gui.Companion.__init__)
+#   ★ 这里原来用 `[...][:400]` 卡"紧随其后"，**那个字数上限是脆的** ——
+#     只因为启动日志多打了两个字段（dpi/scale）就被挤爆、假红了一次（真踩到）。
+#     改成断言**顺序**：`_redraw()` 必须出现在"随剪映自启"那一段之前。
+_tail_init = _src_init.split("self.my_hwnd = h", 1)[1]
+check("⑥a-2 ★★ 拿到顶层 HWND 之后**立刻补一次 `_redraw()`**"
+      "（否则启动后球是空的，要等第一次交互才画出来）",
+      "self.my_hwnd = h\n        print(" in _src_init
+      and "_redraw()" in _tail_init.split("launch_on_start", 1)[0], True)
+
+# ---- ⑥b 渲染层（第二十三批）：真抗锯齿 / 真投影 / 真透明 ----
+#   ★★ 为什么这一段必须有：用户两次反馈"ui 还是丑，看着廉价"。
+#      Canvas 版的问题是**结构性的**，不是调色能救的：Tk 画的边逐像素都是实的
+#      （阶梯），圆角靠顶点序列近似（歪），而且窗口用 -transparentcolor 抠色
+#      （半透明全丢，投影只能画成固体灰块）。
+#      换 `ui_render`（PIL 超采样 + UpdateLayeredWindow 逐像素 alpha）之后，
+#      "边缘是覆盖率""圆外真透明"这两件事变成了**可断言的性质** —— 就在下面。
+import ui_render as _ur   # noqa: E402
+
+
+def _alpha_hist(img):
+    """256 桶 alpha 直方图（别用 `getdata()`：Pillow 14 要弃用它）。"""
+    return img.getchannel("A").histogram()
+
+
+_r_ball = _ur.render(46, 46, 23, scale=1.0, kind="idle", glyph="剪",
+                     ball_a=1.0, pill_a=0.0)
+_P1 = _ur.pad_for(1.0)
+check("⑥b-1 `render` 出的位图 = 形状 + 两侧投影留白（否则投影会被窗口边切掉）",
+      _r_ball.size, (46 + 2 * _P1, 46 + 2 * _P1))
+_ah = _alpha_hist(_r_ball)
+check("⑥b-2 ★ 圆外是真透明（左上角 alpha==0）—— 桌面色透出来，"
+      "不再是 -transparentcolor 那种「抠剩一个 1px 硬边」",
+      _r_ball.getchannel("A").getpixel((0, 0)), 0)
+check("⑥b-3 形状主体是实心的（圆心 alpha==255）",
+      _r_ball.getchannel("A").getpixel((_P1 + 23, _P1 + 23)), 255)
+check("⑥b-4 ★★ 边缘是**覆盖率**（alpha 有大量中间值）—— 这就是「不廉价」的根",
+      sum(_ah[8:247]) > 100, True)
+check("⑥b-5 ★ 投影真的存在且是**羽化**的（球下方有一段 0<alpha<60 的淡影）",
+      sum(_ah[1:60]) > 40, True)
+_mk = _ur.aa_mask(46, 46, 23)
+check("⑥b-6 ★ 圆角被夹住：r=999 与 r=23（正圆）得到**同一张**遮罩（不靠 Pillow 内部兜底）",
+      list(_ur.aa_mask(46, 46, 999).histogram()), list(_mk.histogram()))
+check("⑥b-7 遮罩也是抗锯齿的（不是 0/255 二值）",
+      len([v for v in _mk.histogram()[8:247] if v]) > 3, True)
+#   ★ 期望值**不再写死那串数**（原来是 `(7, 67, 157.0, 107)`）：留白由 `SHADOW_PAD`
+#     决定，把它抄进测试就是又一次"同一份数写两遍" —— 改留白时测试会假红，
+#     而假红会诱导人去改测试而不是看代码。这里从 `pad_for()` / `CARD_BTN_H` 现算。
+_Pc = _ur.pad_for(1.0)
+_bh_c = _ur.CARD_BTN_H
+check("⑥b-8 ★ 卡片按钮命中矩形与卡片本体**同源**（窗口坐标，含投影留白）",
+      _ur.card_buttons(300, 100, 16, 1.0, 2),
+      [(_Pc, _Pc + 100 - _bh_c, _Pc + 150.0, _Pc + 100),
+       (_Pc + 150.0, _Pc + 100 - _bh_c, _Pc + 300, _Pc + 100)])
+check("⑥b-9 单按钮卡片只给一整块热区（别给两块，点哪算一半）",
+      _ur.card_buttons(300, 100, 16, 1.0, 1),
+      [(_Pc, _Pc + 100 - _bh_c, _Pc + 300, _Pc + 100)])
+
+# ---- ⑥c 状态色表：主程序与渲染层**不许各写一套**（色相必须同源） ----
+#   ★★ 第二十三批发现：主程序 `status_color()` 用的是 iOS dark 系统色
+#      （#0a84ff / #30d158 / #ff453a / #ff9f0a），而 `ui_render.ACCENT` 里
+#      另有一套"自己调过的"值。两套并存 = 同一个状态在球上和菜单/状态点里
+#      **不是同一个颜色** —— 这正是本项目反复栽的"同一份数据写两遍"
+#      （同 ui_metrics / ui_layout 那两处注释）。
+#      渲染层保留"降饱和一档"是**有意的**（饱和色大面积铺开确实显廉价），
+#      所以这里不断言数值相等，而是断言"**色相同源**"：允许降饱和，不许换色相。
+#      色相偏移超过 10° 就是"换了颜色"，肉眼一眼看成两个状态。
+
+
+def _hue(rgb):
+    r, g, b = [c / 255.0 for c in tuple(rgb)[:3]]
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    if d < 1e-6:
+        return None                       # 中性灰：没有色相
+    if mx == r:
+        h = ((g - b) / d) % 6
+    elif mx == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    return h * 60.0
+
+
+def _hue_gap(a, b):
+    ha, hb = _hue(a), _hue(b)
+    if ha is None or hb is None:
+        return 0.0 if (ha is None and hb is None) else 180.0
+    d = abs(ha - hb) % 360.0
+    return min(d, 360.0 - d)
+
+
+_STATES = ("idle", "busy", "ok", "err", "ask")
+check("⑥c-1 渲染层强调色覆盖的状态 = 主程序状态色覆盖的状态（不许一边漏一个）",
+      sorted(_ur.ACCENT.keys()), sorted(_STATES))
+_hue_tab = {k: (_ur.ACCENT[k], gui.status_color(k),
+                round(_hue_gap(_ur.ACCENT[k], _ur.hx(gui.status_color(k))), 1))
+            for k in ("busy", "ok", "err", "ask")}
+check("⑥c-2 ★ busy/ok/err/ask 四个状态色**色相同源**（允许降饱和，不许换色相）",
+      all(v[2] <= 10.0 for v in _hue_tab.values()), True)
+check("⑥c-3 ★ idle 在渲染层必须是**近中性灰**（它代表「无状态」，"
+      "不该比 busy/err 更抢眼）",
+      max(_ur.ACCENT["idle"]) - min(_ur.ACCENT["idle"]) <= 12, True)
+check("⑥c-4 ★ `status_color` 真的就是那份 iOS 色板（不是又一处散落的字面量）",
+      (gui.status_color("ok"), gui.status_color("err"), gui.status_color("busy"),
+       gui.status_color("ask")), (gui.GREEN, gui.RED, gui.ORANGE, gui.BLUE))
+
+# ---- ⑥d ★★ 度量同源：渲染层的"默认值"必须等于主程序算出来的那一份 ----
+#   这是本项目**反复栽过两次**的坑（见 ui_metrics / ui_layout 的注释）：
+#   同一份尺寸在两处各写一遍，改一处忘一处 → "算得下画不下" / "宽度少 13px"。
+#   现在主程序把 `ui_metrics()` 传进 `ui_render.render(layout=..., sizes=...)`，
+#   渲染层的那份 `default_layout/default_sizes` 只是 `layout=None` 时的兜底。
+#   ★ 正因为它是"兜底"，才更危险 —— 平时根本不走它，一旦走岔了**没人会发现**。
+#     所以在这里逐项对拍三个缩放档：兜底必须 == 主程序的真值。
+for _s in (0.85, 1.0, 1.25):
+    _dl = _ur.default_layout(_s)
+    _m = gui.ui_metrics(_s)
+    check(f"⑥d layout@scale={_s} 渲染层兜底 == 主程序 ui_metrics",
+          {k: _dl[k] for k in _dl if _dl[k] != _m[k]}, {})
+    _ds = _ur.default_sizes(_s)
+    _want = {"ball": _m["ball_px"], "pct": _m["pct_px"], "disc": _m["disc_px"],
+             "title": _m["t_px"], "sub": _m["s_px"]}
+    check(f"⑥d sizes@scale={_s} 渲染层兜底 == 主程序 ui_metrics",
+          {k: _ds[k] for k in _ds if _ds[k] != _want[k]}, {})
+check("⑥d 主程序只从 ui_layout 取布局（渲染层不再自己算一份真值）",
+      gui.ui_layout(1.0)[0]["tx"], gui.ui_metrics(1.0)["tx"])
+check("⑥d `ring_inset` 不再是「定义了却没人用」的死度量（渲染层必须真的读它）",
+      "ring_inset" in _inspect.getsource(_ur._render), True)
 
 # ---- ⑦ 悬停/离开：不许自激抖动 ----
 _src_leave = _inspect.getsource(gui.Companion._on_leave)
@@ -1596,9 +1757,10 @@ check("⑮ ★ 副文案优先用内核给的（给了就别盖成「第 N/步 �
       "sub = hint or None" in _pump_src, True)
 check("⑯ ★ 队列里 5 元组 / 6 元组都要能吃（老调用方还在投 5 元组）",
       "item[:5]" in _pump_src and "len(item) > 5" in _pump_src, True)
-check("⑰ ★ 第二行文字真有元素承载（sub → _paint 存进 _sub → _redraw 画到 sub_item）",
+check("⑰ ★ 第二行文字真有一路承载（sub → _paint 存进 _sub → _view_state 折成 "
+      "pill['sub'] → _redraw 交给渲染层）",
       "_sub = sub" in _inspect.getsource(gui.Companion._paint)
-      and "sub_item" in _inspect.getsource(gui.Companion._redraw), True)
+      and "self._sub" in _src_vs and "sub=" in _src_rd, True)
 
 # ---- 22d. 文案内容：要能回答"在哪打开 / 怎么打开 / 为什么是这份" ----
 check("⑱ ★ 「打开草稿」提示说清了**怎么开**（双击卡片），不再是光秃秃一句「请打开草稿」",
@@ -2496,42 +2658,187 @@ check("㉢ ui_metrics 是模块里**唯一**定义 tx 的地方（别人只能�
       _gsrc30.count("def ui_metrics("), 1)
 
 # ---- ㉣ 确认卡按钮：底色高亮与文字颜色必须**分开**，且不许用空 fill 复原 ----
-#   事故：矩形与文字共用 tag "ok"，`<Leave>` 时 `itemconfigure("ok", fill="")`
-#   把文字也重置成 tk 的默认色（深色卡上变黑/看不见），光标在矩形与文字之间
-#   移动还会互触发 Leave→Enter 反复闪。
+#   事故（第二十二批，Canvas 版）：矩形与文字共用 tag "ok"，`<Leave>` 时
+#   `itemconfigure("ok", fill="")` 把文字也重置成 tk 的默认色（深色卡上变黑/看不见），
+#   光标在矩形与文字之间移动还会互触发 Leave→Enter 反复闪。
+#   ★★ 第二十三批把整张卡换成**一次渲染的位图**之后，这一类 bug 在结构上消失了：
+#      没有"图元属性"可改，高亮块只是重画时多 paste 一块遮罩。下面断言这条性质
+#      在渲染层里真的成立（高亮只作用于底色，文字颜色永远显式给值）。
 _ask_src31 = _inspect.getsource(gui.Companion.ask_confirm)
-check("㉣ 按钮底色高亮走独立 tag（ok_bg / no_bg），不再和文字共用一个 tag",
-      ('tags=("ok_bg",)' in _ask_src31 and 'tags=("no_bg",)' in _ask_src31), True)
+_dc_src31 = _inspect.getsource(_ur._do_card)
+check("㉣ ★ 高亮只 paste 到底色上（文字颜色永远显式给值，不存在被洗成默认色的路径）",
+      ("if hot:" in _dc_src31 and 'fill=""' not in _dc_src31
+       and "_rgba(col if col else LABEL)" in _dc_src31), True)
 check("㉤ 再也没有 `itemconfigure(\"ok\", fill=...)` 这种会连文字一起改的写法",
       ('itemconfigure("ok", fill=' in _ask_src31
        or 'tag_bind("ok"' in _ask_src31), False)
-check("㉥ 按钮高亮用四角可分别设置的圆角（免得戳出卡片圆角外）",
-      "round_pts_corners(" in _ask_src31, True)
-check("㉦ 悬停/点击按坐标判定（整块按钮区都是热区）",
-      ('cv.bind("<Motion>"' in _ask_src31 and 'cv.bind("<Button-1>"' in _ask_src31), True)
+check("㉥ ★ 高亮块与卡片圆角**相交**（用卡片遮罩裁高亮，而不是直角矩形戳出卡片外）",
+      "ImageChops.multiply(hm, mask)" in _dc_src31, True)
+check("㉦ ★ 悬停/点击按坐标判定，热区矩形来自 `ui_render.card_buttons`（与画出来的同源）",
+      ("_ur.card_buttons(" in _ask_src31
+       and 'card.top.bind("<Motion>"' in _ask_src31
+       and 'card.top.bind("<Button-1>"' in _ask_src31), True)
+check("㉧ ★★ 卡片上没有任何子控件（Tk 子窗口会盖住我们的位图）—— 满篇不许再有 Canvas",
+      "tk.Canvas(" not in _gsrc30, True)
+check("㉨ ★ 卡片内容规格记在 `card.spec` 上（测试断言语义，不用去截图比像素）",
+      ("self.spec = {}" in _inspect.getsource(gui.Popup.__init__)
+       and '"lines": list(lines)' in _ask_src31), True)
+check("㉩ ★★ 卡片透明度**只能重画位图**（不能用 `-alpha`：它和 UpdateLayeredWindow "
+      "共用同一份分层数据，一设就把位图顶掉、整卡变纯色块）",
+      ("attributes(" not in code_of(gui.Popup.alpha)
+       and "with_alpha" in code_of(gui.Popup)), True)
 
-# ---- ㉧ busy 态的图标位不许是空的（那是个"看起来坏掉的色块"） ----
-check("㉧ `pill_glyph` 里 busy 不再返回空串",
+# ---- ㉪ busy 态的图标位不许是空的（那是个"看起来坏掉的色块"） ----
+check("㉪ `pill_glyph` 里 busy 不再返回空串",
       '"busy": ""' in _gsrc30, False)
-check("㉨ busy 的图标位显示进度数字（与球里的数字同源）",
+check("㉫ busy 的图标位显示进度数字（与球里的数字同源）",
       ("def pill_glyph(kind, pct=None)" in _gsrc30
-       and "pill_glyph(self.state[0], self._pct)" in _gsrc30), True)
+       and "pill_glyph(kind, self._pct)" in _gsrc30), True)
+
+
 
 # ---- ㉩ 卡片销毁必须先 withdraw（防御性：这个窗口组合有残影风险） ----
 _pd_src31 = _inspect.getsource(gui.Popup.destroy)
-check("㉩ 卡片销毁先 withdraw 再 destroy（无边框+色键顶层窗的防御性收窗）",
+check("㉬ 卡片销毁先 withdraw 再 destroy（无边框+置顶+分层顶层窗的防御性收窗）",
       ("self.top.withdraw()" in _pd_src31 and "self.top.destroy()" in _pd_src31), True)
-check("㉪ 目标卡片销毁也走这个出口（不许绕过）",
+check("㉭ 目标卡片销毁也走这个出口（不许绕过）",
       "self._card = None\n        if c is not None" in _inspect.getsource(
           gui.Companion._drop_card), True)
 
-# ---- ㉫ 通知卡正文折行（不许单行砍掉"要用户做的事"）+ 中文禁则 ----
-check("㉫ 通知卡正文折行 + 行数上限",
-      ("wrap_lines(f_m, msg, avail)" in _gsrc30
+# ---- ㉮ 通知卡正文折行（不许单行砍掉"要用户做的事"）+ 中文禁则 ----
+check("㉮ 通知卡正文折行 + 行数上限",
+      ("wrap_lines(f_b, msg, avail)" in _gsrc30
        and "CARD_BODY_MAXLINES" in _gsrc30), True)
-check("㉬ wrap_lines 有禁则表（标点不许落在行首）",
+check("㉯ wrap_lines 有禁则表（标点不许落在行首）",
       ("NO_LINE_START" in _inspect.getsource(gui.wrap_lines)
        and "NO_LINE_END" in _inspect.getsource(gui.wrap_lines)), True)
+
+# ---- ㉰ 字体回退：雅黑没有 ✓ ⚠ ⇒ ▶ ☰ 这些符号，PIL 不会像 Tk/GDI 那样自动换字体 ----
+#   ★ 不补回退的话，这些字符会画成"豆腐块"（missing glyph 方框）—— 而它们正是
+#     状态图标的本体（ok=✓ / err=⚠ / ask=⇒），画成方框 = 界面上全是乱码方块。
+_sym_src = _inspect.getsource(_ur.draw_text)
+check("㉰ ★ `draw_text` 会按字符换字体（缺字时回退到 Segoe UI Symbol）",
+      ("pf.runs(" in _sym_src
+       and "_sym_face(" in _inspect.getsource(_ur.PFont)), True)
+check("㉱ ★ 缺字判定按**位图字节**比（不是 getbbox+getlength：那套会把字母 A "
+      "误判成缺字）",
+      ("f.getmask(" in _inspect.getsource(_ur._notdef)
+       and "f.getbbox(" not in _inspect.getsource(_ur._notdef)), True)
+check("㉲ 回退字体真的覆盖 ✓（雅黑没有，符号字体有）",
+      bool(_ur.font("reg", 20).runs("✓")), True)
+
+# ---- ㉳ 第二十四批：把"看着廉价"的三个真根因钉成可断言的性质 ----
+#   ★★ 这一段为什么必须在（用户两次说"ui 还是丑，看着廉价"，不能再靠调色猜）：
+#     本轮把三件事修成了**可测**的性质，任何一条回退都会让画面重新"发虚/发脏"：
+#       ① 125% 屏上被系统**双线性拉伸 1.25 倍**（DPI 虚拟化）→ 中文笔画糊成灰边；
+#       ② 文字跟着形状走 4× 超采样 → 笔画落点 4 除不尽 → 发虚；
+#       ③ 投影尾巴在窗口边界上还剩 α≈9 → 被矩形**硬切一刀** + 白吃一圈鼠标。
+#     这三条都不是"审美问题"，是**像素问题**，所以每一条都有一个精确的判据。
+
+# ㉳-1 DPI awareness 必须在**模块级、任何 Tk 窗口之前**声明。
+#   放在 `tk.Tk()` 之后声明的后果：已建的那个窗口仍然被虚拟化（半 aware =
+#   坐标两套），正是当初「声明后 0.8 倍错位」那次事故的真正成因。
+_main_src = _inspect.getsource(gui)
+_aware_at = _main_src.find("\n_enable_dpi_awareness()")
+#   ★ 找**真正的构造点**（`self.root = tk.Tk()`），不能只找 `.Tk()`：
+#     那段"必须在 tk.Tk() 之前跑"的说明注释里也写着 `.Tk()`，会把首次出现位置
+#     骗到注释上去（本轮真踩到：注释在 4795、声明在 4924 → 断言假红）。
+_tk_at = _main_src.find("self.root = tk.Tk()")
+if _tk_at < 0:
+    _tk_at = _main_src.rfind(".Tk()")
+check(f"㉳-1 ★★ DPI awareness 在**建 Tk 根窗之前**就声明了（半 aware 会让坐标"
+      f"出现两套，正是当年 0.8 倍错位那个坑）  [声明@{_aware_at} < 建窗@{_tk_at}]",
+      _aware_at > 0 and (_tk_at < 0 or _aware_at < _tk_at), True)
+check("㉳-2 生效缩放 = `_scale_follow` × `_dpi`，**只在 `_apply_scale()` 里合成**"
+      "（散在各处自己乘 = 又一次「同一份数写两遍」）",
+      ("s = self._scale_follow * self._dpi" in code_of(gui.Companion._apply_scale)
+       and "self._scale = s" in code_of(gui.Companion._apply_scale)
+       and "self._scale =" not in code_of(gui.Companion._maybe_rescale)), True)
+check("㉳-3 ★ 换显示器要重新取 dpi（主屏 125% / 副屏 100%，不换的话球拖过去"
+      "会大 25%）",
+      ("MonitorFromWindow" in code_of(gui.Companion._sync_dpi)
+       and "_apply_scale()" in code_of(gui.Companion._sync_dpi)
+       and "_sync_dpi()" in code_of(gui.Companion._follow_fast)), True)
+check("㉳-4 ★★ `_dpi` 那个「跟随缩放」属性名**不能**叫 `_follow`"
+      "（会覆盖 33ms 跟随循环 `self._follow()`，after() 收到 float → TypeError）",
+      ("_scale_follow" in code_of(gui.Companion.__init__)
+       and "self._follow = " not in code_of(gui.Companion.__init__)), True)
+
+# ㉳-5 文字走 1x 排版（`draw_text_1x`），**不再**走 `SS*px` 那条超采样路。
+check("㉳-5 ★★ 文字在 **1x 上排版**（不走超采样）—— 4× 排再缩回会让中文笔画发虚",
+      ("draw_text_1x(cv" in _inspect.getsource(_ur._render)
+       and "draw_text_1x(cv" in _inspect.getsource(_ur._do_card)), True)
+check("㉳-6 ★ 文字落点**先取整、再乘 SS**（清晰度的本源是落在 1x 整像素上）",
+      "int(round(x1)) * SS" in code_of(_ur.draw_text_1x), True)
+check("㉳-7 ★ 量宽与绘制同源：`Metrics1x` 也按 1x 量（不然又会「量得下画不下」裁字）",
+      _ur.Metrics1x("reg", 13).measure("等剪映渲染出产物"),
+      _ur.font("reg", 13).measure("等剪映渲染出产物"))
+
+# ㉳-8 ★★ 投影尾巴硬截断到 0：窗口最外一圈必须**完全透明**。
+#   这一条同时保证两件事：① 边界不再「硬切」出一条脏直边；② 外圈不吃鼠标
+#   （Windows 对分层窗口的命中规则 = α 为 0 才放行）。
+_SHAPES = ((48, 48, 23, "球", {"scale": 1.0, "kind": "idle", "glyph": "剪",
+                               "ball_a": 1.0, "pill_a": 0.0}),
+           (238, 48, 14, "胶囊", {"scale": 1.0, "kind": "busy", "glyph": "40",
+                                 "title": "等剪映渲染出产物", "sub": "第 4/7 步 · 40%",
+                                 "pct": 40.0, "bar": 0.4, "ball_a": 0.0, "pill_a": 1.0}),
+           (284, 160, 16, "卡片", {"scale": 1.0, "kind": "ask", "glyph": "!",
+                                  "title": "开始导出?",
+                                  "lines": ("全选 → 顺滑", "草稿会先备份"),
+                                  "buttons": (("取消", False, None),
+                                              ("开始", True, "#0a84ff"))}))
+for _w, _h, _r, _nm, _kw in _SHAPES:
+    _im = (_ur.render_card if _nm == "卡片" else _ur.render)(_w, _h, _r, **_kw)
+    _A = _im.getchannel("A")
+    _W, _H = _im.size
+    _ring = ([_A.getpixel((x, y)) for x in range(_W) for y in (0, _H - 1)]
+             + [_A.getpixel((x, y)) for y in range(_H) for x in (0, _W - 1)])
+    _hist = _A.histogram()
+    check(f"㉳-8{_nm} ★★ 窗口最外一圈 alpha **全 0**（投影尾巴硬截断：边界无脏直边"
+          f" + 外圈不吃鼠标）", max(_ring), 0)
+    check(f"㉳-9{_nm} 投影仍在且是羽化的（有一圈 0<α<100 的淡影）",
+          sum(_hist[1:100]) > 30, True)
+check("㉳-10 ★ 投影峰值不过重、且明显下移（暗底上不许出现一圈黑脏印、"
+      "也不许像描边那样贴着）",
+      (_ur.SHADOW_ALPHA, _ur.SHADOW_DY) if _ur.SHADOW_ALPHA <= 120
+      and _ur.SHADOW_DY >= 3.0 else "过重/过贴", (_ur.SHADOW_ALPHA, _ur.SHADOW_DY))
+
+# ㉳-11 ★★ 形状在**剪映暗底**上必须站得住。
+#   旧配色 (46,46,54)→(30,30,35) 和剪映底 (26,26,28) 几乎同色 —— 球下半圈直接消失
+#   （证据 shots/v_bg_dark.png：四颗球只剩一团暗影，只有橙色环看得见）。
+_JDARK = (26, 26, 28)       # 剪映暗色 UI 底色的实测近似
+#   ★ 这几个 check 的 got 一律是 **bool**、want 一律是 `True`：
+#     把实测值写进**名字**里（而不是塞进 want），否则 FAIL 时会打印
+#     "期望=(68,68,79)… 实际=True" 这种读不懂的对照 —— 本轮真踩到过。
+check(f"㉳-11 ★★ 球面亮度明显高于剪映暗底（旧值几乎同色 → 球在剪映上「消失」）"
+      f"  [顶{_ur.SURF_TOP}/底{_ur.SURF_BOT} vs 剪映{_JDARK}]",
+      (min(_ur.SURF_TOP) - max(_JDARK) >= 20
+       and min(_ur.SURF_BOT) - max(_JDARK) >= 4), True)
+check(f"㉳-12 渐变跨度够（≥ 24 级才读得出球面，而不是一张贴纸）"
+      f"  [跨度 {min(_ur.SURF_TOP) - min(_ur.SURF_BOT)} 级]",
+      min(_ur.SURF_TOP) - min(_ur.SURF_BOT) >= 24, True)
+check(f"㉳-13 卡片底比球**再亮一档**（明度分层，不靠描边画一圈假立体）"
+      f"  [卡顶{min(_ur.CARD_TOP)}>球顶{min(_ur.SURF_TOP)}, 卡底{min(_ur.CARD_BOT)}>球底{min(_ur.SURF_BOT)}]",
+      (min(_ur.CARD_TOP) > min(_ur.SURF_TOP)
+       and min(_ur.CARD_BOT) > min(_ur.SURF_BOT)), True)
+
+# ㉳-14 进度**环**的凹槽必须是暗色。
+#   旧版拿亮色当轨道，扣在已经抬亮过的球面上 = 两道同心亮边 → 读成"双层描边"很廉价。
+#   凹槽要"陷进去"才像实体材质，所以 R/G/B 必须暗、α 要够。
+check(f"㉳-14 ★ 进度环的凹槽是**暗色**（亮轨道扣在亮球上 = 双描边，那正是廉价感的来源）"
+      f"  [_ur.GROOVE={_ur.GROOVE}]",
+      (max(_ur.GROOVE[:3]) < 64 and _ur.GROOVE[3] >= 60), True)
+
+# ㉳-15 `ring_inset` **单一来源**：主程序 `ui_metrics()` 与渲染层 `_ur.default_layout()`
+#   必须给同一个值，且绘制端只能读 `lay["ring_inset"]`（不许在绘制处再写一个魔数）。
+#   上一轮就是这里写了两份值 → 环心偏了、和球边不贴。
+_gi = getattr(gui, "ui_metrics", None)
+check(f"㉳-15 ★ `ring_inset` 单一来源：`ui_metrics()` 与 `_ur.default_layout()` 同值，"
+      f"且绘制端只读 `lay[\"ring_inset\"]`  "
+      f"[{_gi(1.0)['ring_inset'] if _gi else None} vs {_ur.default_layout(1.0)['ring_inset']}]",
+      (bool(_gi) and _gi(1.0)["ring_inset"] == _ur.default_layout(1.0)["ring_inset"]
+       and 'inset = float(lay["ring_inset"])' in _inspect.getsource(_ur._render)), True)
+
 
 print()
 print("失败项:", fails if fails else "无")

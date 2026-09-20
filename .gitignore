@@ -57,7 +57,7 @@ _acc_*.txt
 
 # ============================================================
 # 保留（不要往上面加）
-#   源码：jy_core.py / 剪映伴侣.py / JianyingCompanion.spec
+#   源码：jy_core.py / 剪映伴侣.py / ui_render.py / JianyingCompanion.spec
 #         version_info.txt / app.ico / 剪映伴侣安装包.iss / ChineseSimplified.isl
 #   工具：重启伴侣.py
 #   测试：test_guard.py / test_gui_smoke.py / test_settle.py

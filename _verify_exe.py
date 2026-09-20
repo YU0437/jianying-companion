@@ -78,6 +78,30 @@ def find_code(co, name):
     return None
 
 
+def module_consts(co):
+    """模块级 `名字 = 字面量` 的映射（`LOAD_CONST` 紧跟 `STORE_NAME` 成对扫描）。
+
+    ★★ 第二十四批新增。为什么需要它：这一批的改动**几乎全在渲染层常量上**
+      （配色 / 投影 / 凹槽），而 `all_consts()` 只收字符串 —— 数字和元组收不到。
+      光核"名字在不在"是不够的：`SURF_TOP = (46,46,54)`（旧值）和
+      `(68,68,79)`（新值）**名字一模一样**，只有值能证明改动真的打进去了。
+      这正是本项目已经栽过两次的那条规矩：**名字在 ≠ 值对**。
+    """
+    import dis
+    out, pend = {}, None
+    for ins in dis.get_instructions(co):
+        op = ins.opname
+        if op in ("EXTENDED_ARG", "RESUME", "NOP", "CACHE", "PRECALL"):
+            continue
+        if op == "LOAD_CONST":
+            pend = ins.argval
+            continue
+        if op in ("STORE_NAME", "STORE_GLOBAL") and pend is not None:
+            out[ins.argval] = pend
+        pend = None                              # 任何别的指令都打断"常量→存名"配对
+    return out
+
+
 def frozen_default_flag(co, key):
     """★ 真值核验：把 exe 里 `default_config` 的 code object 直接执行，
     取出真实默认值 —— 不看名字，看**值**（名字在，值也可能是旧的 True）。
@@ -425,7 +449,11 @@ def main():
                  "autosetup_cli",
                  # ★★ 第十七批（用户"用户可以暂终止，终止时自动还原"）：
                  #   起流程时挂令牌 / 中止入口 / 中止的收尾分支
-                 "_start_pipeline", "_abort_pipeline"]
+                 "_start_pipeline", "_abort_pipeline",
+                 # ★★ 第二十四批（v1.5.0 质感返工）：DPI 感知 + 缩放合成唯一出口
+                 #   —— 少了这几条，"125% 屏被系统拉伸 1.25 倍"那个根因就回来了
+                 "_enable_dpi_awareness", "_dpi_awareness_state", "_set_pmv2",
+                 "dpi_ratio", "_apply_scale", "_sync_dpi"]
         gmiss = [n for n in gmust if n not in gnames]
         # 文案常量核验：菜单标签 / 空闲提醒必须真在 exe 里。
         # ★ 第十四批：原来这里**另写了一份**只递归 code object 的收集器（和
@@ -474,7 +502,57 @@ def main():
         print("GUI 必需文案缺失:", txt_miss if txt_miss else "无")
         gui_ok = (not gmiss) and (not txt_miss)
 
-    ok = (not miss) and (not hit) and flag_ok and gui_ok
+    # ---- ★★ 第二十四批（v1.5.0 质感返工）：**渲染层单独核验** ----
+    #   为什么必须单独一段：这一批的改动**几乎全在 `ui_render.py`**（新模块）里，
+    #   主脚本的 code object 里看不到它的任何常量。只核 GUI 会得到
+    #   "看起来核过了、其实渲染层一行没核"的**假绿** —— 而用户看到的就是渲染层。
+    ur_ok = True
+    #   `ui_render` 是**纯 Python 模块** → 在 PyInstaller 6.x 里进 `PYZ.pyz`，
+    #   不是独立的 toc 条目，所以直接按模块名从 PYZ 取（和 `jy_core` 同一条路）。
+    ur_names, ur_co = load_module(arc, "ui_render")
+    if ur_co is None:
+        print("!! 取不到 ui_render → 渲染层无法核验（这一批的改动就白核了）")
+        ur_ok = False
+    else:
+        umust = ["draw_text_1x", "_text_mask", "Metrics1x", "_do_card", "_render",
+                 "_mask", "_vgrad", "pad_for", "default_layout", "card_metrics",
+                 "CARD_TOP", "CARD_BOT", "GROOVE", "SURF_TOP", "SURF_BOT",
+                 "SHADOW_PAD", "SHADOW_BLUR", "SHADOW_ALPHA", "SHADOW_DY"]
+        umiss = [n for n in umust if n not in ur_names]
+        mc = module_consts(ur_co)
+        #   ★ 值核验（不是名字）：这一批修的就是这几个数，被改回旧值就等于没修。
+        #     三条判据和 `test_guard` 的 ㉳-11/13/14 完全同源。
+        uvals = {"SURF_TOP": (68, 68, 79), "SURF_BOT": (36, 36, 43),
+                 "CARD_TOP": (76, 76, 86), "CARD_BOT": (44, 44, 52),
+                 "GROOVE": (0, 0, 0, 88)}
+        bad = []
+        for k, want in uvals.items():
+            got = mc.get(k, "<缺>")
+            print(f"   ui_render.{k} = {got!r}  (期望 {want!r})")
+            if got != want:
+                bad.append(k)
+        # 判据（和 ㉳ 组一致，避免"两个地方各判一套"）：
+        st, sb = mc.get("SURF_TOP") or (0,), mc.get("SURF_BOT") or (0,)
+        ct, cb = mc.get("CARD_TOP") or (0,), mc.get("CARD_BOT") or (0,)
+        gv = mc.get("GROOVE") or ()
+        jdark = (26, 26, 28)
+        if not (min(st) - max(jdark) >= 20 and min(sb) - max(jdark) >= 4):
+            bad.append("形状没比剪映暗底亮")
+        if not (min(ct) > min(st) and min(cb) > min(sb)):
+            bad.append("卡片没比球再亮一档")
+        if not (gv and max(gv[:3]) < 64 and gv[3] >= 60):
+            bad.append("进度环凹槽不是暗色")
+        sal, sdy = mc.get("SHADOW_ALPHA"), mc.get("SHADOW_DY")
+        print(f"   ui_render.SHADOW_ALPHA = {sal!r}  SHADOW_DY = {sdy!r}"
+              f"  (期望 ≤120 且 ≥3.0)")
+        if not (isinstance(sal, int) and sal <= 120 and isinstance(sdy, (int, float))
+                and sdy >= 3.0):
+            bad.append("投影过重/过贴")
+        print("渲染层必需名字缺失:", umiss if umiss else "无")
+        print("渲染层取值不对:", bad if bad else "无")
+        ur_ok = (not umiss) and (not bad)
+
+    ok = (not miss) and (not hit) and flag_ok and gui_ok and ur_ok
     print("核验结果:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
