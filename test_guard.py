@@ -386,6 +386,61 @@ print("[13] ★ 静态闸门：不留「用了却没先赋值」的局部变量�
 import ast as _ast
 
 
+def _bad_local_kwargs(src_text):
+    """找「调**本地嵌套函数**时传了它签名里没有的关键字」。
+
+    ★★ 为什么必须静态查（2026-09-20 真踩到，而且崩在兜底逻辑里）：
+      `open_draft_by_card` 内部有 `def say(t):`，但函数体里 3 处写了
+      `say(..., sub=...)`（"怎么做/为什么"第二行提示）。签名不匹配 → `TypeError`
+      **直接冒泡**。静态类型检查不覆盖、pyflakes 也不报（它只看名字有没有用到），
+      单元测试又恰好没走到那 3 个分支 ⇒ 一直潜伏到线上。
+      真实代价（安装版日志 09:40:53）：用户点「中止」→ 运行的**中止后自动还原**
+      接手 → 走到这里抛异常 → 「已中止（还原没做成）」，草稿**留在预合成后的
+      坏状态**没还原回去。**兜底代码自己炸掉，比原故障更糟**。
+      所以：凡是"本地定义的小助手函数"，调用点传的关键字必须能在它签名里找到。
+    """
+    tree = _ast.parse(src_text)
+    out = []
+
+    def _sig(fn):
+        p = {a.arg for a in list(getattr(fn.args, "posonlyargs", []))
+             + list(fn.args.args) + list(fn.args.kwonlyargs)}
+        return p, fn.args.kwarg is not None
+
+    def _locals_of(fn):
+        d = {}
+        for st in _ast.iter_child_nodes(fn):
+            if isinstance(st, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                d[st.name] = _sig(st)
+        return d
+
+    def _scan(owner, nodes, local_defs):
+        for node in nodes:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                 _ast.ClassDef)):
+                inner = dict(local_defs)
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    inner[node.name] = _sig(node)        # 同名内层会遮蔽外层
+                _scan(owner, _ast.iter_child_nodes(node), inner)
+                continue
+            if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name):
+                nm = node.func.id
+                if nm in local_defs:
+                    allowed, has_kwarg = local_defs[nm]
+                    if not has_kwarg:                    # 有 **kwargs 就都合法
+                        for k in node.keywords:
+                            if k.arg and k.arg not in allowed:
+                                out.append((owner, nm, k.arg, node.lineno))
+            _scan(owner, _ast.iter_child_nodes(node), local_defs)
+
+    for fn in _ast.walk(tree):
+        if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            ld = _locals_of(fn)
+            if ld:
+                _scan(fn.name, _ast.iter_child_nodes(fn), ld)
+    return out
+
+
 def _use_before_assign(src_text):
     tree = _ast.parse(src_text)
     problems = []
@@ -447,6 +502,26 @@ check("检查器本身有效（合成样例能被抓出）",
 _src_core = open(core.__file__, encoding="utf-8").read()
 _problems = _use_before_assign(_src_core)
 check("jy_core.py 无「先用后赋值」的局部变量", _problems, [])
+
+# ★★ 同批加的静态守卫：调**本地嵌套函数**时传的关键字，必须存在于它的签名里。
+#   （`def say(t)` + `say(..., sub=...)` 这类；细节见 `_bad_local_kwargs` 的注释。
+#    它逮住的是一次**崩在中止后自动还原里**的线上事故。）
+check("签名不匹配检查器本身有效（合成 `def say(t)` + `say(sub=)` 能被抓出）",
+      bool(_bad_local_kwargs("def f():\n    def say(t):\n        pass\n"
+                             "    say('x', sub='y')\n")), True)
+_bad_kw = []
+for _p in sorted(HERE.rglob("*.py")):
+    if any(_s in _p.parts for _s in ("build", "dist", "installer", ".git",
+                                    ".venv", "__pycache__")):
+        continue
+    try:
+        _txt = _p.read_text(encoding="utf-8")
+    except Exception:
+        continue
+    for _o, _f, _k, _l in _bad_local_kwargs(_txt):
+        _bad_kw.append(f"{_p.name}:{_l} {_o}()→{_f}({_k}=…)")
+check(f"全项目：调本地嵌套函数没有传错关键字 {_bad_kw if _bad_kw else ''}",
+      _bad_kw, [])
 
 print("[14] ★ 2026-09-18 实测三坑回归：认错窗口 / 模态框锁焦点 / 靠封面分数排序")
 import json as _json  # noqa: E402

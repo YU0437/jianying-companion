@@ -2501,12 +2501,17 @@ def open_draft_by_card(hwnd, draft_dir, st=None, timeout=20, min_score=0.55,
          点错了 → 立刻退回首页、换一张卡再试（最多 `max_tries` 次）；
       ③ 同一个草稿被重复打开、或候选槽位用尽 → 直接放弃，把控制权交回用户。
     """
-    def say(t):
-        if st:
-            try:
-                st(t)
-            except Exception:
-                pass
+    def say(t, sub=None):
+        # ★★ 2026-09-20 修 bug（**崩在安全网里**，代价很大）：
+        #   本函数体内有 3 处 `say(..., sub=...)`（"怎么做/为什么"第二行提示），
+        #   但这个本地 `say` 一直只收 1 个参数 → `TypeError` **直接冒泡**。
+        #   实测现场（日志 09:40:53）：用户点「中止」→ `run_pipeline` 的
+        #   **中止后自动还原**接手 → 走到 `open_draft_by_card` 抛异常 →
+        #   「已中止（还原没做成）」，草稿**留在预合成后的坏状态没还原回去**。
+        #   也就是"兜底代码自己炸了"，比原故障更糟。
+        #   现在与 `ensure_edit_page.say` 完全统一：收 `sub`，并走 `_call_status`
+        #   （它会兼容只收 2 个参数的老回调，且自己吞掉回调内部异常）。
+        _call_status(st, t, "busy", None, None, sub)
 
     name = Path(draft_dir).name
     cover_p = draft_cover_path(draft_dir)

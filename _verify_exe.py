@@ -682,7 +682,37 @@ def main():
     if _unpacked > 40 * 1048576:
         _dead_hit = _dead_hit + [f"解包体积 {_unpacked / 1048576:.2f}MB 超 40MB 上限"]
 
-    ok = (not miss) and (not hit) and flag_ok and gui_ok and ur_ok and (not _dead_hit)
+    # ================================================================
+    # ★★ 1.9.1：**函数签名也必须真的进包** —— 治"用旧源码打包"
+    #   起因：1.9.1 修的 bug 是 `open_draft_by_card` 内层 `def say(t)` 与
+    #   函数体里 3 处 `say(..., sub=...)` 签名不匹配 → 中止后自动还原抛
+    #   `TypeError` 崩掉 → 草稿没还原回去（装机版日志 09:40:53 实录）。
+    #
+    #   为什么这条必须在**产物侧**查，光靠 test_guard 不够：
+    #     `test_guard` 读的是**工作区源码**，而发布链路上真正会出事的是
+    #     「源码改对了，但 PyInstaller 拿旧 build/ 或旧 PYZ 打了一版」
+    #     —— 本项目**真踩过**增量构建假装成功（打印 `Build complete!` 但一行没重建）。
+    #     源码断言在这种情况下**照样全绿**，包却是旧的。
+    #
+    #   为什么查签名而不是查字符串：
+    #     `sub=` 那几句提示文案**改之前就有**，拿字符串判据根本没有区分度；
+    #     而 `co_varnames` 是 code object 的**结构**，改没改一查就知道（注释/文案
+    #     在字节码里都不存在，只有结构能证明）。
+    #   口径：`jy_core` 里**被 `sub=` 调用过**的内层 `say` 只有这两处，
+    #        所以只断言这两处收 `sub`（不必动其他 4 个只收 1 参的 `say`）。
+    # ================================================================
+    _sig_bad = []
+    for _owner in ("open_draft_by_card", "ensure_edit_page"):
+        _fn = find_code(core_co, _owner)
+        _sy = find_code(_fn, "say") if _fn is not None else None
+        if _sy is None:
+            _sig_bad.append(f"{_owner} 里找不到内层 say")
+        elif "sub" not in _sy.co_varnames:
+            _sig_bad.append(f"{_owner}.say 不收 sub（co_varnames={_sy.co_varnames}）")
+    print("内层 say 签名（两处都必须收 sub）:", _sig_bad if _sig_bad else "无")
+
+    ok = (not miss) and (not hit) and flag_ok and gui_ok and ur_ok \
+        and (not _dead_hit) and (not _sig_bad)
     print("核验结果:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
