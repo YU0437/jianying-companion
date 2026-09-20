@@ -10,11 +10,49 @@
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 
-EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                   "dist", "JianyingCompanion.exe")
+# ★★ 第二十八批：打包从 onefile 换成 **onedir**（启动快 ~1.2 秒，见 spec 顶部）。
+#   产物位置随之从 `dist\JianyingCompanion.exe` 变成
+#   `dist\JianyingCompanion\JianyingCompanion.exe`（依赖在旁边的 `_internal\`）。
+#   ⚠️ 这里**两条路径都认**（优先 onedir）—— 因为"核验脚本找不到 exe"会表现成
+#      `CArchiveReader` 报一个和打包无关的错，很容易被误读成"打包坏了"。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ONEDIR = os.path.join(_HERE, "dist", "JianyingCompanion", "JianyingCompanion.exe")
+_ONEFILE = os.path.join(_HERE, "dist", "JianyingCompanion.exe")
+EXE = _ONEDIR if os.path.isfile(_ONEDIR) else _ONEFILE
+
+# ★★ onedir 下**依赖与素材不在 exe 里**，在旁边的 `_internal\`：
+#   实测 exe 自己的 CArchive 只剩 12 个条目（bootloader + PYZ），
+#   所以"素材在不在包里""有没有死重"都必须改看这个目录。
+#   本文件的其余核验（函数名/常量/文案）读的是 PYZ，**两种打包方式都一样**，不受影响。
+BUNDLE_ROOT = os.path.join(os.path.dirname(EXE), "_internal")
+ONEDIR = os.path.isdir(BUNDLE_ROOT)
+
+
+def payload_entries():
+    """产物里"会被写到用户机器上"的全部条目 → [(相对路径(正斜杠), 字节数)]。
+
+    · onedir：遍历 `_internal\\`（这里的字节数就是**解包后**的大小，可直接和
+      onefile 的 toc 口径对照）；
+    · onefile：解 CArchive 的 toc，取**解包长度**（不是压缩长度 —— 启动耗时
+      花在解包上，压缩后那点字节数看不出差别）。
+    """
+    if ONEDIR:
+        root = Path(BUNDLE_ROOT)
+        return [(p.relative_to(root).as_posix(), p.stat().st_size)
+                for p in sorted(root.rglob("*")) if p.is_file()]
+    arc = CArchiveReader(EXE)
+    out = []
+    for name, e in (getattr(arc, "toc", None) or {}).items():
+        try:
+            ulen = int(list(e)[2] or 0)
+        except Exception:
+            ulen = 0
+        out.append((str(name).replace("\\", "/"), ulen))
+    return out
 
 
 def all_names(co):
@@ -602,18 +640,49 @@ def main():
         #   ★ PyInstaller 6.x 的 `arc.toc` 是 **dict**（键=条目名），不是 list ——
         #     按 list 写 `e[0]` 会取到**名字的第一个字符**，于是"资源明明在包里"
         #     却报缺失（我自己先踩了一次）。名字里用的是反斜杠，统一成正斜杠再比。
-        _toc = getattr(arc, "toc", None) or {}
-        toc_names = {str(n).replace("\\", "/")
-                     for n in (_toc.keys() if hasattr(_toc, "keys") else _toc)}
-        gif_ok = any(n.endswith("ball_avatar.gif") for n in toc_names)
-        print("动图资源 ball_avatar.gif 打进包了:", gif_ok)
+        #   ★★ 第二十八批：onedir 下素材**不在 exe 的 toc 里**，在 `_internal\`。
+        #      所以这里改成问 `payload_entries()`（它自己知道该查哪儿）。
+        #      只查 toc 会在 onedir 上报"素材没打进包"——**假红**，而且是那种
+        #      "看着很有道理所以差点就信了"的假红（本批实测撞到过）。
+        _names = {n for n, _s in payload_entries()}
+        gif_ok = any(n.endswith("ball_avatar.gif") for n in _names)
+        print("动图资源 ball_avatar.gif 打进包了:", gif_ok,
+              "(查 %s)" % ("_internal/ (onedir)" if ONEDIR else "exe 的 CArchive toc"))
         if not gif_ok:
             bad.append("动图资源没打进包（datas 漏带）")
         print("渲染层必需名字缺失:", umiss if umiss else "无")
         print("渲染层取值不对:", bad if bad else "无")
         ur_ok = (not umiss) and (not bad)
 
-    ok = (not miss) and (not hit) and flag_ok and gui_ok and ur_ok
+    # ================================================================
+    # ★★ 第二十八批（启动性能）：**包里不许有死重**
+    #   为什么要在这里查（而不是只在 spec 里写 excludes）：
+    #     `excludes` 只能证明"我写了这条"，证明不了"产物里真的没有"。
+    #     而这一批的收益**全在"解包体积"上** —— onefile 每次启动都要把包解到
+    #     %TEMP%，实测 --selftest 打包后 ~1750ms vs 源码直跑 ~385ms
+    #     ⇒ 那 ~1.37s 就是解包。删掉的字节数 = 省下的启动时间。
+    #     所以判据必须是**产物侧**的：直接数 exe 里的条目。
+    #   ⚠️ 别拿"exe 磁盘大小"当判据：压缩后看不出来（libcrypto 那种高压缩比的
+    #      占了压缩包一大块，解包后又一大块，两者不是一回事）。这里按**解包后**算。
+    # ================================================================
+    _DEAD_PAT = ("PIL/_avif", "PIL/_webp", "/win32/", "pythonwin",
+                 "pythoncom", "pywintypes")
+    #   ★ onedir / onefile 都走 `payload_entries()`：前者遍历 `_internal\`、
+    #     后者解 CArchive toc 的**解包长度** —— 两边口径一致，都是"写进用户机器
+    #     的字节数"。换算成启动时间就看这个数（压缩后的大小看不出来）。
+    _rows = payload_entries()
+    _dead_hit = [n for n, _u in _rows
+                 if any(p in n for p in _DEAD_PAT)]
+    _unpacked = sum(u for _n, u in _rows)
+    print(f"包里条目 {len(_rows)} 个 · 解包后合计 {_unpacked / 1048576:.2f} MB"
+          f"  ({'onedir _internal/' if ONEDIR else 'onefile CArchive'})")
+    print("死重条目混入:", _dead_hit if _dead_hit else "无")
+    #   ★ 上界断言：裁完实测约 35.8MB（裁剪前 46.42MB）。给 40MB 留余量 ——
+    #     一旦哪天有 hook 把 7MB 的 avif 又拖回来，这里立刻红。
+    if _unpacked > 40 * 1048576:
+        _dead_hit = _dead_hit + [f"解包体积 {_unpacked / 1048576:.2f}MB 超 40MB 上限"]
+
+    ok = (not miss) and (not hit) and flag_ok and gui_ok and ur_ok and (not _dead_hit)
     print("核验结果:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

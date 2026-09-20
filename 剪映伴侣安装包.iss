@@ -6,8 +6,8 @@ AppName=剪映伴侣
 ; ★ 显式 AppId：升级/重装时 Inno 靠它认"这是同一个程序"。
 ;   不写的话默认用 AppName，中文名一旦改了就会变成"两个程序"。
 AppId={{8F3A6C21-4B7D-4E5A-9C1E-2D5B7A90431F}
-AppVersion=1.8.0
-VersionInfoVersion=1.8.0.0
+AppVersion=1.9.0
+VersionInfoVersion=1.9.0.0
 VersionInfoDescription=剪映伴侣 - 预合成导出辅助
 AppPublisher=JianyingCompanion
 ; ★ 默认装到用户目录（不是 Program Files）—— 理由见下面 [Code] 里的说明：
@@ -16,7 +16,7 @@ AppPublisher=JianyingCompanion
 DefaultDirName={localappdata}\JianyingCompanion
 DefaultGroupName=剪映伴侣
 UninstallDisplayIcon={app}\剪映伴侣.exe
-OutputBaseFilename=剪映伴侣-Setup-1.8.0
+OutputBaseFilename=剪映伴侣-Setup-1.9.0
 OutputDir=installer
 Compression=lzma2/max
 SolidCompression=yes
@@ -28,7 +28,17 @@ SetupIconFile=app.ico
 Name: "chinese"; MessagesFile: "ChineseSimplified.isl"
 
 [Files]
-Source: "dist\JianyingCompanion.exe"; DestDir: "{app}"; DestName: "剪映伴侣.exe"; Flags: ignoreversion
+; ★★ 第二十八批：打包从 onefile 换成 **onedir**（启动快 ~1.2 秒：实测 1517ms → 256ms，
+;   因为 onefile 每次启动都要把整个包解到 %TEMP%\_MEIxxxx，而这一步在 onedir 里不存在）。
+;   所以这里从"拷一个 exe"变成"拷一个目录"：
+;     · `_internal\` 是 PyInstaller 摊开的依赖，必须**紧挨着主 exe**（bootloader 按相对位置找）；
+;     · 主 exe 仍然重命名成 `剪映伴侣.exe` —— 快捷方式、任务管理器、卸载图标都认这个名字，
+;       改掉会让已装用户的快捷方式全指向一个不存在的文件。
+;   ⚠️ 加 `recursesubdirs createallsubdirs`：`_internal` 下面有多层目录（PIL\、tcl8\…），
+;      漏了它只会装进去一层，症状是"装完能开、一点某个功能就崩"。
+Source: "dist\JianyingCompanion\_internal\*"; DestDir: "{app}\_internal"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\JianyingCompanion\JianyingCompanion.exe"; DestDir: "{app}"; DestName: "剪映伴侣.exe"; Flags: ignoreversion
 ; ★ 给别人用的东西必须带一份"先读我"（对方不看聊天记录，只看安装包）
 Source: "使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; ★★ 这里**故意不预置** 伴侣配置.json（第九批定的规矩）：
@@ -68,6 +78,9 @@ Type: files; Name: "{app}\运行日志.txt"
 Type: files; Name: "{app}\运行日志.txt.1"
 ; ★ 自动配置的结果文件（第十六批）：装完提示完就删了，这里再兜一次
 Type: files; Name: "{app}\_自动配置结果.txt"
+; ★ 第二十八批（onedir）：`_internal\` 是**我们的**依赖目录，卸载时该清掉；
+;   它和用户的 伴侣配置.json / 运行日志.txt 是两回事（那两个在 {app} 下、不删）。
+Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: dirifempty; Name: "{app}"
 
