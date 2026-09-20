@@ -216,7 +216,17 @@ BUSY = ORANGE
 BAR_BG = TRACK
 MENU_BG = SURFACE_SOLID     # 右键菜单**不能**用色键，否则菜单整块透明
 
-BASE_W, BASE_H, BASE_R = 238, 48, 14      # 缩放 1.0 时的基准尺寸
+#   ★ 为什么拆成三行写（而不是原来的 `BASE_W, BASE_H, BASE_R = 238, 48, 14`）：
+#     那个写法在字节码里是 `LOAD_CONST (238,48,14)` + `UNPACK_SEQUENCE` +
+#     三个 `STORE_NAME`，`_verify_exe.module_consts()` 的"LOAD_CONST 紧跟 STORE_NAME"
+#     配对**匹配不上** —— 于是"球径到底打进包没有"在 exe 上**没法核验**
+#     （只能核名字，而名字一直叫 BASE_H）。拆开后每个值都是可核验的字面量。
+#     这一批恰好动了球径，正需要这条。
+BASE_W = 238                              # 缩放 1.0 时的基准宽度（横条目标宽）
+BASE_H = 56                               # ★ 48 → 56（第二十六批，用户："球再稍微大点"）。
+                                          #   球和横条**同高**，所以这一改同时把横条加高、
+                                          #   把球心能给的画面做大（线稿小人越大约好认）。
+BASE_R = 16                               # ★ 14 → 16：横条跟着变高，圆角同比例
 W, H, R = BASE_W, BASE_H, BASE_R          # 兼容旧引用（真正生效的是 self.W/H/R）
 CORNERS = {"右上": "tr", "右下": "br", "左上": "tl", "左下": "bl"}
 
@@ -242,13 +252,13 @@ FONT_FAMILY = "Microsoft YaHei UI"
 #   用户原话：「做成悬浮球样式，不然会挡住用户操作，自动依附右下角，加点流畅样式」。
 #   矛盾点：横条**必须够宽**才能把「请打开草稿「X」（必须这个）」整句写出来（实测 377px），
 #   可横条这么宽就一定会压住时间线。解法 = **形状可变**：
-#     · 平时 = 直径 46 的圆球（只有一个数字/一个字 + 一圈进度弧），压不住任何东西；
+#     · 平时 = 直径 56 的圆球（只有一个数字/一个字 + 一圈进度弧），压不住任何东西；
 #     · **鼠标悬停** → 平滑长成横条，完整文案随便读，移开自动收回去；
 #     · **需要你动手时**（等你导出 / 出错 / 要你打开草稿）→ 自己长出来，不用你去悬停；
 #     · 干活中（busy）只留圆球 + 进度弧，盯着不打扰。
 #   形状只由 (宽, 圆角) 决定：宽 == 高 且 圆角 == 高/2 就是正圆，所以"球 ↔ 横条"
 #   只是把宽度和圆角平滑插值，底图是同一个多边形，不会突变。
-PILL_R = 14                # 展开成横条时的圆角（半径）
+PILL_R = 16                # 展开成横条时的圆角（半径）★ 14→16：横条随球一起变高（第二十六批）
 BALL_MIN_W = 24            # 窗口最小宽度（兜底，别算出 0 或负数）
 ANIM_FRAME_MS = 16         # 动画帧间隔（≈60fps）
 ANIM_SHAPE_SECS = 0.18     # 形状（球↔横条）渐变时长
@@ -306,7 +316,7 @@ def ui_metrics(s=1.0):
       两处各写一遍 = 迟早再走岔，所以抽成唯一来源，两边都调它。
     """
     pad = max(9, int(round(10 * s)))
-    icon_d = max(20, int(round(28 * s)))
+    icon_d = max(20, int(round(32 * s)))      # ★ 28→32：球 48→56，图标位同比例（第二十六批）
     return {
         "pad": pad,
         "icon_d": icon_d,
@@ -314,15 +324,15 @@ def ui_metrics(s=1.0):
         "pad_r": max(10, int(round(12 * s))),
         "fsz": max(7, int(round(10 * s))),
         "ssz": max(6, int(round(8 * s))),
-        "ring_inset": max(4, int(round(7 * s))),
+        "ring_inset": max(4, int(round(8 * s))),   # ★ 7→8：跟着球径走（第二十六批）
         "bar_h": max(3, int(round(4 * s))),
         # ★★ 自绘层用的字号（**像素**，不是 Tk 的点字号）—— 第二十三批。
         #   为什么单列一组：旧版用 `tkfont.Font(size=10)`，那是 10 **点**，
         #   在 96 DPI 下 = 13.33px；而新渲染层是按像素排版的。两者混用就会出现
         #   "量宽按 13.33px、绘制按 13px"——差 2% 足够让最后一行字被窗口裁掉，
         #   而这正是这个项目反复栽的那个坑（见 ui_layout 的注释）。
-        "ball_px": max(12, int(round(20 * s))),
-        "pct_px": max(10, int(round(16 * s))),
+        "ball_px": max(12, int(round(24 * s))),    # ★ 20→24：球 48→56（第二十六批）
+        "pct_px": max(10, int(round(18 * s))),     # ★ 16→18：同上
         "disc_px": max(9, int(round(13 * s))),
         "t_px": max(10, int(round(13 * s))),
         "s_px": max(9, int(round(11 * s))),
@@ -1376,7 +1386,14 @@ class Companion:
             "ball_text": (self._ball_text() if ball_a > 0.004 else None),
             # ★ 球心动图的帧号（None = 不画动图、照旧画字）。这里只回答"第几帧"，
             #   "这一帧画多大 / 要不要给进度环让位"全在渲染层算（它才知道球多大）。
-            "avatar": (self._avatar_frame() if ball_a > 0.004 else None),
+            # ★★ 门控是 `ball_a > 0.004 **或** pill_a > 0.004`，不是只看 ball_a。
+            #   第二十六批实测踩到：悬停**完全展开**之后 `ball_a` 归 0，而横条那个
+            #   图标位里画的就是同一张脸 —— 只看 ball_a 的话，一展开小人就变回数字
+            #   （README 预览图里当场就能看到：球上是小人、展开后图标位写成 "58"）。
+            #   这正是 ㉴-12/㉴-18 想防的"一次形变里换脸"，只不过它们只钉了渲染层，
+            #   漏了上面这层门控。两处都要在。
+            "avatar": (self._avatar_frame()
+                       if (ball_a > 0.004 or pill_a > 0.004) else None),
             "ball_pct": (float(cur["pct"]) if ring else None),
             "ring": ring,
             "pill": pill,

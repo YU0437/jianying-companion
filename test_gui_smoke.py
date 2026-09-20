@@ -598,12 +598,15 @@ try:
     check("③ 开跑：`_working` 翻成 True", c._working, True)
     check("④ 开跑那一刻从第 0 帧起（不是接着上次的帧数往下跑）",
           c._avatar_idx == 0, c._avatar_idx)
-    c._work_t0 -= 0.25                      # 假装已经跑了 250ms（帧长 100ms）
+    c._work_t0 -= 0.25                      # 假装已经跑了 250ms
     c._tick_avatar()
-    check("⑤ 跑了 250ms → 帧号推到第 2 帧（时间轴由 ui_render 按 GIF 逐帧时长给）",
-          c._avatar_idx, 2)
+    #   ★ 期望值从 `ui_render` 的时间轴**推**出来，不写死"250ms = 第 2 帧"：
+    #     素材每帧时长会换（100ms → 80ms），写死就等于把这行测试变成抄写。
+    _want = _ur.avatar_index_at(250)
+    check(f"⑤ 跑了 250ms → 帧号推到第 {_want} 帧（时间轴由 ui_render 按 GIF 逐帧时长给）",
+          (c._avatar_idx, _want > 0), (_want, True))
     check("⑥ 帧号透到 `_view_state()`（渲染层读的就是它）",
-          c._view_state()["avatar"], 2)
+          c._view_state()["avatar"], _want)
 
     #   ★ 最关键的一环：帧号**真的被传进渲染层**了。
     #     "算了但没传下去"是这一批最容易犯的错（而且屏幕上只表现为"一直定格"）。
@@ -650,6 +653,21 @@ try:
         _glyphs[_k] = c._view_state()["avatar"]
     check("⑪ ★ ok/err/ask 不画动图（退回 ✓ × ! —— 那三个字有一眼可读的信息量）",
           _glyphs == {"ok": None, "err": None, "ask": None}, _glyphs)
+
+    #   ★★ 第二十六批：悬停**完全展开**之后，图标位那张脸必须还在。
+    #   实测踩到的 bug：`_view_state()` 里 `avatar` 的门控只看 `ball_a`，而展开完成时
+    #   `ball_a` 正好归 0 —— 于是"一悬停展开，球上的小人变回数字"
+    #   （README 预览图上直接能看到：球里是小人，展开后图标位写着 "58"）。
+    #   这正是 ㉴-12/㉴-18 想防的"一次形变里换脸"，但它们只钉了渲染层，漏了这层门控。
+    c.set_state("busy", "执行中…", "全选 · 复合片段 · 预合成", hold=0)
+    c._hover = True
+    settle()
+    _ex = c._view_state()
+    check("⑫ ★★ 完全展开（ball_a→0）后 `avatar` 仍非 None —— 图标位和球心共用同一张脸",
+          (_ex["ball_a"] <= 0.004, _ex["pill_a"] > 0.9, _ex["avatar"] is not None),
+          (True, True, True))
+    c._hover = False
+    settle()
 
     # 阶段表本身：起点必须递增、终点 100、步数与流水线对得上
     _st = core.PIPELINE_STAGES

@@ -119,8 +119,8 @@ ACCENT = {
     "ask": (72, 156, 255),
 }
 
-SZ_BALL = 20        # 球里的字（idle/ok/err/ask）
-SZ_PCT = 16         # 球里的百分比数字
+SZ_BALL = 24        # 球里的字（idle/ok/err/ask）★ 20→24：球 48→56（第二十六批）
+SZ_PCT = 18         # 球里的百分比数字 ★ 16→18：同上（现在只在动图缺帧时兜底画）
 SZ_TITLE = 13       # 胶囊主文案
 SZ_SUB = 11         # 胶囊副文案
 SZ_DISC = 13        # 胶囊图标字符
@@ -400,8 +400,11 @@ def default_layout(s=1.0):
     """
     pad = max(9, int(round(10 * s)))
     return {"pad": pad,
-            "icon_d": max(20, int(round(28 * s))),
-            "tx": pad + max(20, int(round(28 * s))) + max(8, int(round(9 * s))),
+            #   ★ 28 → 32（第二十六批）：球径 48 → 56（用户："球再稍微大点"），
+            #     而横条**和球同高**，所以图标位跟着放大同样比例（32/56 ≈ 28/48 = 0.57）。
+            #     不跟的话图标会显得"缩在中间"，图标位里那个小人也会小一圈。
+            "icon_d": max(20, int(round(32 * s))),
+            "tx": pad + max(20, int(round(32 * s))) + max(8, int(round(9 * s))),
             "pad_r": max(10, int(round(12 * s))),
             "bar_h": max(3, int(round(4 * s))),
             # ★ 进度弧的环心离球边多少（1x px）。**必须由这里给**：
@@ -409,7 +412,9 @@ def default_layout(s=1.0):
             #   又硬编码了一个 4.5 —— 典型"同一个数写两遍"（改了主程序那份不会生效）。
             #   ★ 5 → 7（第二十四批）：球面提亮之后，内壁高光和环只隔 2px，
             #     看着是"双边框"。外推 2px 才把"环"和"球边"分成两层。
-            "ring_inset": max(4, int(round(7 * s)))}
+            #   ★ 7 → 8（第二十六批）：球 48 → 56，这个数**得跟着球走**，
+            #     它是"环离球边多少"，球变大了不跟，环就会贴到球边上（比例从 29% 掉到 25%）。
+            "ring_inset": max(4, int(round(8 * s)))}
 
 
 def pack_layout(m):
@@ -703,6 +708,21 @@ def with_alpha(img, a):
 #          按 (帧号, 直径) 记忆 —— 直径只在"进/出进度环"或换 DPI 时变，
 #          所以一帧一辈子最多重算几次，稳态下 0 成本。
 #   ③ 贴上去  → `draw_avatar()`：RGB 底 + L 掩码（本文件的老规矩，混合是真的）。
+#
+# ★★ 2026-09-20 第二十六批：素材换成**线稿**（用户："换成这个，球再稍微大点"，
+#    贴了一张 337x270 / 694 帧的小人**线稿**动图）。
+#    它和上一张**根本不是一个物种**，所以第 ②/③ 步分两条路走：
+#      · 上一张 = **照片**（不透明画面）→ 整个正方形缩到直径 d、裁圆、当"球心里的一张圆照片"贴。
+#      · 这一张 = **黑底 + 浅灰细线**（实测近黑 93.3%、亮线只 3.6%）→ 把**黑当透明**、
+#        把线条本身当不透明度，用固定浅色画在**球自己的面上**。
+#    为什么不能沿用照片那条路（试过，见 `shots/_new_avatar_cmp.png` 的 A 列）：
+#      ① 贴一个黑圆片进球里 = 球心上多出一个**更黑的圆**，边界一眼可见，
+#         不再是"球上有个小人"，而是"球上贴了张贴纸"；
+#      ② 源图线宽只有 3~5px，缩到 48px 时线宽 <1px —— 当成照片整幅面积平均后
+#         会**糊成一片浅灰**，反而比原来的"剪"字更难读。当掩码画就只损失亮度不损失对比。
+#    判据是**实测出来的数**（`classify_avatar`），不是"看文件名猜"：
+#      近黑占比 ≥ 85% 且 亮像素占比 ≤ 10% → 线稿。两个阈值都留了很大余量
+#      （烘完的素材实测 91.7% / 1.6%），换一张照片（近黑通常 < 20%）绝不可能误判成线稿。
 AVATAR_FILE = "ball_avatar.gif"
 AVATAR_SIDE = 160       # 烘焙边长上限（源图 250x291 → 取 min(w,h)=250，再降到 160）。
                         #   ★ 160 够不够？**够，而且是算出来的不是拍的**：
@@ -721,10 +741,55 @@ AVATAR_INSET = 4        # 没有进度环时：头像直径 = 球径 - 2×4（1x
                         #     "整帧装进正方形 + 缩 4" 在 48px 球里最读得出"一个人在动"。
 AVATAR_GAP = 2          # 有进度环时：头像和环之间再留这么多（1x px）
 
-_AV = None              # None=没加载过 · False=加载失败（退回画字） · list[RGBA]
+# ——— 线稿（"黑当透明"）那条路的三个数 ———
+AVATAR_INK_BLACK = 0.85     # 近黑占比 ≥ 此值 → 疑似线稿（烘完的素材实测 91.7%，余量 6.7 点）
+AVATAR_INK_LIT = 0.10       # 亮像素占比 ≤ 此值 → 疑似线稿（实测 1.6%）
+                            #   ★ 两个阈值都是"数量级判据"：照片哪怕拍夜景，也有一大片中间调，
+                            #     近黑到不了 85%。而线稿反过来说：背景本来就是一整块黑。
+AVATAR_INK_GAIN = 1.7       # 线条亮度增益。★ 为什么必须有：源图线宽 3~5px，
+                            #   缩到 96（烘）再缩到 48（上屏）之后峰值已经不透明不了，
+                            #   整体乘一下把"线心"顶回 255、同时把抗锯齿边的层次留着
+                            #   （不是二值化：二值化会让斜线出现台阶）。
+                            #   LUT 预表，别用 point(lambda)：3.2M 次 Python 调用 ≈ 秒级。
+AVATAR_INK_RGB = (238, 240, 247)   # 线的颜色：近白，带一点冷调，和球面(深灰)拉得开
+_AV_INK_LUT = [min(255, int(v * AVATAR_INK_GAIN)) for v in range(256)]
+
+AVATAR_PHOTO = "photo"  # 不透明画面 → 当"球心里的一张圆照片"贴
+AVATAR_INK = "ink"      # 黑底线稿 → 黑当透明，线条画在球面上
+
+_AV = None              # None=没加载过 · False=加载失败（退回画字） · list[RGBA] / list[L]
+_AV_KIND = None         # AVATAR_PHOTO / AVATAR_INK（由 `classify_avatar` 定，加载时算一次）
 _AV_MS = ()             # 逐帧**起始**时刻（ms），用来把墙上时钟映射成帧号
 _AV_TOTAL = 0           # 一轮总时长（ms）
-_AV_DISC = {}           # (帧号, 直径) → 圆形 RGBA（记忆化）
+_AV_DISC = {}           # (帧号, 直径) → 可直接 paste 的图层（记忆化）
+
+
+def classify_avatar(img):
+    """一帧 → `"photo"` / `"ink"`。**纯函数**（测试直接喂合成图）。
+
+    ★ 判据只看两个**比例**，不看具体像素：近黑多少、亮多少。
+      线稿的签名是"绝大多数是黑的、亮的极少"，而照片这两项都远达不到阈值
+      （哪怕是一张夜景照片，也有大片中间调）。
+      实测：**用户原图**（337x270）近黑 93.34% / 亮线 3.58%；**烘完的素材**（96x96）
+      近黑 91.72% / 亮线 1.57% —— 都在阈值 85% / 10% 之外很远（缩图会把抗锯齿
+      中间调并进"近黑"，所以烘完的近黑比例反而更低一点，这也是为什么阈值不能卡在 93）。
+    """
+    g = img.convert("L")
+    h = g.histogram()
+    tot = float(max(1, g.size[0] * g.size[1]))
+    black = sum(h[:16]) / tot
+    lit = sum(h[128:]) / tot
+    return AVATAR_INK if (black >= AVATAR_INK_BLACK and lit <= AVATAR_INK_LIT) else AVATAR_PHOTO
+
+
+def _to_ink_mask(sq):
+    """正方形帧 → **不透明度掩码**（L）：黑 → 0（透明），线 → 抬亮后的强度。
+
+    ★ 先转 L 再抬亮，而不是"先反相"：反相会把 JPEG/GIF 压缩留下的暗部噪点
+      也抬成一片灰雾（源图 16..127 之间还有 3% 的像素，都是线的抗锯齿边，
+      抬亮是对的；但反相会让"纯黑背景"变成 255 的实心块 —— 整个圆都糊住）。
+    """
+    return sq.convert("L").point(_AV_INK_LUT)
 
 
 def res_dir():
@@ -783,16 +848,21 @@ def _fit_square(src, side):
 def avatar_frames():
     """球心动图的帧表（**懒加载，只解一次**）。
 
-    · 成功 → `list[RGBA]`（正方形、不透明；圆是贴的时候才裁的）
+    · 成功 → `list[RGBA]`（照片路）或 `list[L]`（线稿路）—— 都是正方形，
+      圆/透明度是贴的时候才算的
     · 失败 → `False`（并且**记住失败**，别每帧都去开一次不存在的文件）
 
     ★ 为什么在**这里**就把边长压到 `AVATAR_SIDE`，而不是留到贴的时候按需缩：
       这一步是"一次投 28ms 换 3.4MB 内存"的分界线 —— 压完就能**丢掉原始帧**
       （250x291 的 RGBA 一帧 291KB，23 帧 6.7MB），不压就得一直拎着。
+    ★ 循环里只 `copy()`（P 模式副本 ~9KB/帧）、**不在循环里 convert**：
+      上一张素材 23 帧无所谓，这张 347 帧 96x96 也无所谓，但"用户随手换一张
+      694 帧 337x270 的原图"就会在 `raw` 里堆到 **253MB** —— 那是一次 OOM。
+      攒 P 副本 → 出循环再逐帧 fit+convert，峰值就只有"一帧的 RGBA"。
     ★ 返回 `False` 而不是抛异常：这是**外观**的一部分，一张素材缺失绝不该把
       界面带崩 —— 调用方（`render`）看到 False 就照旧画那个字。
     """
-    global _AV, _AV_MS, _AV_TOTAL
+    global _AV, _AV_KIND, _AV_MS, _AV_TOTAL
     if _AV is not None:
         return _AV
     try:
@@ -804,16 +874,25 @@ def avatar_frames():
             #     `.info["duration"]`）—— 所以时长和像素必须**同一趟**收完，
             #     再 `Image.open` 一遍纯属白解一次图（32ms）。
             acc += max(10, int(f.info.get("duration") or 100))
-            raw.append(f.convert("RGBA"))
+            #   ★ 必须 `copy()`：`Iterator` 交出来的是**同一个对象**（内部 seek 复用），
+            #     只 append 引用的话列表里会全是最后一帧 —— 这个错不报错，
+            #     只是屏幕上"每一帧都长一样"（看着像没动）。
+            raw.append(f.copy())
         if not raw:
             _AV = False
             return _AV
         side = min(min(raw[0].size), AVATAR_SIDE)
-        _AV = [_fit_square(f, side) for f in raw]
+        kind = classify_avatar(raw[0])      # 只看第一帧：整只 GIF 是同一套配色
+        _AV_KIND = kind
+        if kind == AVATAR_INK:
+            _AV = [_to_ink_mask(_fit_square(f, side)) for f in raw]
+        else:
+            _AV = [_fit_square(f, side) for f in raw]
         _AV_MS, _AV_TOTAL = tuple(ms), max(1, acc)
     except Exception as e:                            # 缺文件 / 坏 GIF / 无解码器
         print(f"[ui] 球心动图不可用({e}) → 退回画字", flush=True)
         _AV = False
+        _AV_KIND = None
     return _AV
 
 
@@ -821,6 +900,17 @@ def avatar_count():
     """帧数（不可用时 0）—— 调用方拿它判断"要不要按时钟推进"。"""
     f = avatar_frames()
     return 0 if not f else len(f)
+
+
+def avatar_kind():
+    """这张素材被认成哪一路：`AVATAR_PHOTO` / `AVATAR_INK` / `None`（没加载或失败）。
+
+    ★ 单独开一个读取口，是为了让测试和探针**不必去碰 `_AV_KIND` 这个全局**：
+      探针要断言"用户新给的这张确实走的线稿路"，读它就够了。
+    """
+    if _AV is None:
+        avatar_frames()
+    return _AV_KIND
 
 
 def avatar_index_at(ms):
@@ -865,7 +955,16 @@ def avatar_d(ball, ring_inset, ring=False, s=1.0):
 
 
 def _avatar_disc(fi, d):
-    """直径 d 的**圆形**头像（RGBA）—— 按 (帧号, 直径) 记忆化。"""
+    """直径 d 的**可直接 paste 的图层**（RGBA）—— 按 (帧号, 直径) 记忆化。
+
+    · 照片路 → 整个圆都是画面：缩到 d、`putalpha(圆遮罩)`。
+    · 线稿路 → **圆内其余地方是透明的**：只有线是不透明的。
+      ★ 这就是两条路真正的分野：照片是"贴一张圆片"，线稿是"在球面上画几笔"。
+      ★ 线稿也要裁圆：源图的线常常一直画到画面边缘（本图 638/694 帧触边），
+        不裁的话球外面（那圈投影/透明区）会被画上几根线。
+    ★ 全透明的帧返回 None → 上层 `draw_avatar` 返回 False → 调用方画字兜底
+      （"球心空着"是唯一不可接受的结果）。
+    """
     key = (int(fi), int(d))
     got = _AV_DISC.get(key)
     if got is not None:
@@ -875,20 +974,31 @@ def _avatar_disc(fi, d):
         return None
     src = fr[int(fi) % len(fr)]
     d = max(1, int(d))
-    sq = src if src.size == (d, d) else src.resize((d, d), Image.LANCZOS)
-    sq = sq.copy()
-    sq.putalpha(aa_mask(d, d, d / 2.0))
+    if _AV_KIND == AVATAR_INK:
+        m = src if src.size == (d, d) else src.resize((d, d), Image.LANCZOS)
+        if m.getbbox() is None:
+            return None
+        lay = Image.new("RGBA", (d, d), AVATAR_INK_RGB + (255,))
+        lay.putalpha(ImageChops.multiply(m, aa_mask(d, d, d / 2.0)))
+    else:
+        sq = src if src.size == (d, d) else src.resize((d, d), Image.LANCZOS)
+        sq = sq.copy()
+        sq.putalpha(aa_mask(d, d, d / 2.0))
+        lay = sq
     if len(_AV_DISC) > 256:
         _AV_DISC.clear()
-    _AV_DISC[key] = sq
-    return sq
+    _AV_DISC[key] = lay
+    return lay
 
 
-def draw_avatar(cv, fi, cx, cy, d, a=1.0, ring_inset=7.0, ring=False, s=1.0):
+def draw_avatar(cv, fi, cx, cy, d, a=1.0, ring_inset=8.0, ring=False, s=1.0):
     """把第 `fi` 帧贴到 `cv`（**RGB** 底）的 (cx, cy) 圆心上，直径 `d`（SS 空间）。
 
     ★ 逐帧的动画**必须**走这里：它只在"帧号或直径变了"时才真做一次 resize+裁圆
       （见 `_avatar_disc`），稳态下就是一次 `paste`。
+    ★ 两条路（照片 / 线稿）共用这一份代码：照片路贴的是"一张圆照片"（整个圆盖住），
+      线稿路贴的是"球面上的几笔线"（圆内其余地方 alpha=0，底下球面照常露出来）。
+      差别全在 `_avatar_disc` 造出来的那张图里，这里的混合逻辑不用分叉。
     ★ 返回 True/False = 画没画成。画不成时调用方要**接着把那个字画上** ——
       宁可球心是"剪"，也不能是空的。
     """

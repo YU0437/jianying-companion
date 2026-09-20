@@ -2848,12 +2848,28 @@ check(f"㉳-15 ★ `ring_inset` 单一来源：`ui_metrics()` 与 `_ur.default_l
 # 三条最关键：
 #   ① 判据 `is_working` 的取值表 —— 它决定"哪些状态算在跑"（全项目最容易被改错的一处：
 #      `kind="busy"` 有 25 个调用点，其中一半是"开关已切"的通知，那些**不该**跳舞）；
-#   ② 跑起来时进度环**一个像素都没被挡**（小人 40px 会把 48px 球里的环整个盖掉 ——
-#      这不是"不好看"，是"看不到进度"，必须由测试兜着）；
-#   ③ 帧号进了缓存键（不然 23 帧全命中同一张图，屏上永远一个定格）。
+#   ② 跑起来时进度环**一个像素都没被挡**（头像是待机 48px、环内沿只有 37.5px ——
+#      不缩就会把环整个盖掉，这不是"不好看"，是"看不到进度"，必须由测试兜着）；
+#   ③ 帧号进了缓存键（不然几百帧全命中同一张图，屏上永远一个定格）。
+#
+# ★★ 第二十六批：素材从**照片**换成了**线稿**（"换成这个，球再稍微大点"），
+#   于是这一组多了两件事：
+#   ④ 两条路（照片贴圆片 / 线稿把黑当透明画线）**都**要留着且都对 ——
+#      `classify_avatar` 是纯函数，测试直接喂合成图，不靠"当前仓库里恰好是哪张素材"；
+#   ⑤ 所有几何断言**从 `gui.BASE_H` 和 `default_layout()` 推**，不再写死 48/40/25 ——
+#      这一批恰好动了球径（48→56），写死的数全得跟着改一遍，那不叫测试叫抄写。
 _ur._AV = None
 _ur._AV_DISC.clear()
 _ur._CACHE.clear()
+
+_BD = int(gui.BASE_H)                                  # 球径（1×）= 横条高
+_RI = _ur.default_layout(1.0)["ring_inset"]            # 环心离球边
+_ICON = _ur.default_layout(1.0)["icon_d"]
+_D_IDLE = _ur.avatar_d(_BD, _RI, ring=False)
+_D_RING = _ur.avatar_d(_BD, _RI, ring=True)
+_HALF = _BD / 2.0
+_RING_R = _HALF - _RI                                  # 环心半径
+_RING_IN = _HALF - _RI - 1.25                          # 环内沿半径（1.25 = 线宽一半）
 
 # ㉴-1 `is_working` 取值表。
 #   hold=0 → 真在跑；hold>0 → 只是一条会自己收回的通知。
@@ -2882,64 +2898,119 @@ check("㉴-4 ★★ spec 的 `datas` 把动图打进包（漏带不报错，只�
       (("ball_avatar.gif" in _spec_txt) and ("datas=[(" in _spec_txt)), True)
 
 # ㉴-5 时间轴按 GIF **自己的**逐帧时长建（不是硬编码 100ms）。
+#   ★ 断言全部从 `_ur._AV_MS` / `_AV_TOTAL` 推：这一批素材从 100ms 换成了 80ms，
+#     写死"100ms 处是第 1 帧"就会变成抄写而不是测试。
 _nfr = _ur.avatar_count()
-check(f"㉴-5 帧数与时间轴  [帧数 {_nfr}]", (_nfr >= 2
-      and _ur.avatar_index_at(0) == 0 and _ur.avatar_index_at(99) == 0
-      and _ur.avatar_index_at(100) == 1 and _ur.avatar_index_at(2300) == 0), True)
+_ms = _ur._AV_MS
+check(f"㉴-5 帧数与时间轴  [帧数 {_nfr} · 每帧 {_ms[1] - _ms[0]}ms · 一轮 {_ur._AV_TOTAL}ms]",
+      (_nfr >= 2
+       and _ur.avatar_index_at(0) == 0
+       and _ur.avatar_index_at(_ms[1] - 1) == 0
+       and _ur.avatar_index_at(_ms[1]) == 1
+       and _ur.avatar_index_at(_ur._AV_TOTAL) == 0), True)
 check("㉴-6 ★ 帧号**进缓存键**：换一帧就必须换一张图（不然屏上一个定格）",
-      (len({hash(_ur.render(48, 48, 24, scale=1.0, kind="idle", glyph="",
+      (len({hash(_ur.render(_BD, _BD, _HALF, scale=1.0, kind="idle", glyph="",
                             ball_a=1.0, pill_a=0.0, avatar=i).tobytes())
-            for i in range(_nfr)}) == _nfr), True)
+            #   ★ 只抽 24 帧（347 帧全渲一遍要好几秒）：抽出来的这一组
+            #     两两不同就足以证明"帧号真的进了键"。
+            for i in range(0, _nfr, max(1, _nfr // 24))}) == len(range(0, _nfr, max(1, _nfr // 24)))), True)
 
 # ㉴-7 头像直径：待机填满球心、跑起来缩进环内。
-_ri = _ur.default_layout(1.0)["ring_inset"]
-_d_idle = _ur.avatar_d(48, _ri, ring=False)
-_d_ring = _ur.avatar_d(48, _ri, ring=True)
-_ring_in = 48 / 2.0 - _ri - 1.25          # 环内沿半径
-check(f"㉴-7 ★★ 跑起来时头像直径缩到**环内沿以内**（否则 40px 会把 48px 球里的"
-      f" 进度环整个盖住 → 看不到进度）  [待机 {_d_idle} / 环 {_d_ring} vs 内沿 {_ring_in * 2:.1f}]",
-      (_d_idle > _ring_in * 2 and _d_ring < _ring_in * 2
-       and abs(_d_idle - (48 - 2 * _ur.AVATAR_INSET)) < 1e-6), True)
+check(f"㉴-7 ★★ 跑起来时头像直径缩到**环内沿以内**（否则 {_D_IDLE:.0f}px 会把 {_BD}px 球里的"
+      f" 进度环整个盖住 → 看不到进度）  [待机 {_D_IDLE:.0f} / 环 {_D_RING:.0f} vs 内沿 {_RING_IN * 2:.1f}]",
+      (_D_IDLE > _RING_IN * 2 and _D_RING < _RING_IN * 2
+       and abs(_D_IDLE - (_BD - 2 * _ur.AVATAR_INSET)) < 1e-6), True)
 
 # ㉴-8 ★★ 跑起来时**进度环一个像素都没被挡**（直接对像素断言，不看截图）。
 def _shot(**kw):
     kw.setdefault("glyph", "")
-    return _ur.render(48, 48, 24, scale=1.0, ball_a=1.0, pill_a=0.0, **kw)
+    return _ur.render(_BD, _BD, _HALF, scale=1.0, ball_a=1.0, pill_a=0.0, **kw)
 
 _noav = _shot(kind="busy", pct=40, glyph="40")
 _av = _shot(kind="busy", pct=40, avatar=3)
 _p1, _p2 = _noav.load(), _av.load()
-_C = 24 + _ur.pad_for(1.0)
+_C = _HALF + _ur.pad_for(1.0)
 _band = _inner = 0
 for _y in range(_noav.size[1]):
     for _x in range(_noav.size[0]):
         _rr = math.hypot(_x - _C, _y - _C)
         _dd = max(abs(_p1[_x, _y][_i] - _p2[_x, _y][_i]) for _i in range(4))
-        if 15.0 <= _rr <= 19.0:
+        if _RING_R - 2 <= _rr <= _RING_R + 2:          # 环带（环心 ±2）
             _band = max(_band, _dd)
-        elif _rr <= 11.0:
+        elif _rr <= (_D_RING / 2.0 - 4):               # 头像内部（肯定被动过）
             _inner = max(_inner, _dd)
 check(f"㉴-8 ★★ 跑起来时进度环**一个像素都没被挡**（环带逐像素最大差必须是 0）"
-      f"  [环带差 {_band} · 圆心差 {_inner}]",
+      f"  [环带 r={_RING_R}±2 差 {_band} · 头像内部差 {_inner}]",
       (_band == 0 and _inner > 30), True)
 
-# ㉴-9 待机头像正好 40px（= 球 - 2×4），且整块在球内（不许被球边裁出一圈直边）。
+# ㉴-9 ★ 待机头像**整块都在球心那个圆里**（不许越出球）。
 #   ★ 怎么量出"头像占地"：拿 **同一颗空球**（`glyph=""`、无动图）当底，
 #     逐像素求差 —— 差出来的就**只有**头像，不掺内壁高光/球边那一圈。
 #     （先用"亮度>150"量过一版，被球顶那条 122 的受光边蹭到，量成 40×43 的假红。）
+#   ★★ 这一条在第二十六批**换了立意**：照片路是"一个填满的正方形圆片"，
+#     线稿路是"圆里几笔线" —— 两者共同的不变量只剩"**不越出那个圆**"。
+#     所以这里断言的是：差异像素全在头像圆内（留 1px 给抗锯齿），
+#     且**确实画了东西**（不能是"什么都没画"也判绿）。
 _blank = _shot(kind="idle")
 _idle_im = _shot(kind="idle", avatar=0)
 _bp, _ip = _blank.load(), _idle_im.load()
 _foot = [(x, y) for y in range(_idle_im.size[1]) for x in range(_idle_im.size[0])
          if max(abs(_bp[x, y][_i] - _ip[x, y][_i]) for _i in range(4)) > 2]
-_lx = [q[0] for q in _foot]
-_ly = [q[1] for q in _foot]
-check(f"㉴-9 ★ 待机头像直径 = 球-2×{_ur.AVATAR_INSET}（={_d_idle:.0f}px），"
-      f"且不越出球  [占地 {max(_lx) - min(_lx) + 1}×{max(_ly) - min(_ly) + 1}"
-      f" @({min(_lx)},{min(_ly)})]",
-      (max(_lx) - min(_lx) + 1 == int(_d_idle)
-       and max(_ly) - min(_ly) + 1 == int(_d_idle)
-       and min(_lx) == min(_ly) == round(24 + _ur.pad_for(1.0) - _d_idle / 2)), True)
+_spill = [q for q in _foot if math.hypot(q[0] - _C, q[1] - _C) > _D_IDLE / 2.0 + 1.0]
+check(f"㉴-9 ★ 待机画面（直径 {_D_IDLE:.0f}px）**全落在球心圆内**，且确实画了东西"
+      f"  [差异像素 {len(_foot)} 个 · 越界 {len(_spill)} 个]",
+      (len(_foot) > 200 and not _spill), True)
+
+# ㉴-9b ★★ 线稿路的分野：圆里应该是**几笔画**，不是"一整块不透明的画"。
+#   实测这一条才能真正把"换成线稿"和"还是上一张照片"分开：两种都"画了东西"、
+#   都"不越界"，只有**覆盖率**差一个数量级（线稿 <10%，照片 ~85%）。
+_ink_px = sum(1 for q in _foot if math.hypot(q[0] - _C, q[1] - _C) <= _D_IDLE / 2.0)
+_covr = _ink_px / (math.pi * (_D_IDLE / 2.0) ** 2.0)
+check(f"㉴-9b ★★ 素材被判成**线稿**（`avatar_kind()`={_ur.avatar_kind()}）："
+      f"圆里是稀疏的线，不是一整块画  [覆盖率 {_covr * 100:.1f}% < 35%]",
+      (_ur.avatar_kind() == _ur.AVATAR_INK and 0.0 < _covr < 0.35), True)
+
+# ㉴-9c ★★ `classify_avatar` 是**纯函数**，两条路都必须活着（喂合成图，
+#   不靠"仓库里此刻恰好是哪张素材" —— 哪天用户再换回一张照片，
+#   走错路的后果是"整个圆糊成一坨黑"，而这条链上没有任何别的东西会报错）。
+_syn_ink = _Img.new("RGB", (80, 80), (0, 0, 0))
+_Draw.Draw(_syn_ink).ellipse([16, 10, 62, 70], outline=(186, 186, 186), width=3)
+_syn_photo = _Img.new("RGB", (80, 80), (90, 120, 200))
+_Draw.Draw(_syn_photo).rectangle([8, 8, 72, 72], fill=(210, 180, 140))
+check(f"㉴-9c ★★ 线稿判据：黑底细线 → ink，彩色画面 → photo"
+      f"（阈值 近黑≥{_ur.AVATAR_INK_BLACK:.0%} 且 亮≤{_ur.AVATAR_INK_LIT:.0%}）",
+      (_ur.classify_avatar(_syn_ink), _ur.classify_avatar(_syn_photo)),
+      (_ur.AVATAR_INK, _ur.AVATAR_PHOTO))
+
+# ㉴-9d/9e ★★ 两条路造出来的图层**必须不一样** —— 这就是第二十六批改的全部内容：
+#   照片路 = "圆内整块不透明"（球心里贴了张圆照片）；
+#   线稿路 = "只有线不透明、圆内其余透出球面"（球面上画了几笔）。
+_keep_kind, _keep_av = _ur._AV_KIND, _ur._AV
+_ur._AV_DISC.clear()
+_ur._AV_KIND = _ur.AVATAR_INK
+_ink_lay = _ur._avatar_disc(0, 48).copy()
+_ur._AV_DISC.clear()                    # ★ 必须清：两条路共用同一个记忆化字典
+_ur._AV = [_Img.new("RGBA", (96, 96), (200, 80, 40, 255)) for _ in range(3)]
+_ur._AV_KIND = _ur.AVATAR_PHOTO
+_photo_lay = _ur._avatar_disc(0, 48).copy()
+_ur._AV, _ur._AV_KIND = _keep_av, _keep_kind
+_ur._AV_DISC.clear()
+_ur._CACHE.clear()
+#   ★ 门槛用 alpha>60 而不是 >200：1x 空间里线只有半像素宽（渲染真正用的是
+#     SS 空间那张 d=192 的图），峰值本来就不会满 —— 用 >200 量会量出"只有 7 个像素"，
+#     那是**度量选错**，不是线没画出来。
+_ink_lit = [(x, y) for y in range(48) for x in range(48)
+            if _ink_lay.getpixel((x, y))[3] > 60]
+_cov2 = len(_ink_lit) / (math.pi * 24.0 ** 2)
+check(f"㉴-9d ★★ 线稿路：只有线不透明（覆盖率 {_cov2 * 100:.1f}%），"
+      f"线色固定 {_ur.AVATAR_INK_RGB}，圆外一律透明",
+      (len(_ink_lit) > 30 and _cov2 < 0.35
+       and all(_ink_lay.getpixel(q)[:3] == _ur.AVATAR_INK_RGB for q in _ink_lit[:40])
+       and _ink_lay.getpixel((2, 2))[3] == 0 and _ink_lay.getpixel((45, 45))[3] == 0), True)
+check("㉴-9e ★★ 照片路仍在：圆内整块不透明、圆外透明、颜色取自画面本身",
+      (_photo_lay.getpixel((24, 24)), _photo_lay.getpixel((2, 2)),
+       _photo_lay.getpixel((45, 45))),
+      ((200, 80, 40, 255), (200, 80, 40, 0), (200, 80, 40, 0)))
 
 # ㉴-10 兜底：素材不可用时**照旧画字**（球心绝不能是空的）。
 _av_keep = _ur._AV
@@ -3001,52 +3072,78 @@ check(f"㉴-15 ★★ 连压 30 帧后球顶那圈亮线**一点都不漂**（�
       _im.getpixel((31, 10)) == _pk, True)
 
 
-# ㉴-16 ★★ 按**真实循环节奏**（33ms）跑满一轮：帧号必须是 0..22 再回 0，
+# ㉴-16 ★★ 按**真实循环节奏**（33ms）跑满一轮：帧号必须 0..N-1 再回 0，
 #   不跳帧、不重复、不空转 —— 这一条才真正回答"看上去是在动吗"。
 #   （帧号算对了但采样节奏不对，屏幕上照样是"两帧来回闪"或者"一顿一顿"。）
-_seq, _cur = [], None
-for _t in range(0, 2400, 33):                   # 2.4s ≈ 一轮（23 帧 × 100ms）
-    _i = _ur.avatar_index_at(_t)
-    if _i != _cur:
-        _cur = _i
-    _seq.append(_i)
+_TICK = 33
+_seq = [_ur.avatar_index_at(_t) for _t in range(0, _ur._AV_TOTAL + _TICK, _TICK)]
 _chg = [_seq[0]] + [b for a, b in zip(_seq, _seq[1:]) if a != b]
-check(f"㉴-16 ★★ 33ms 采样跑满一轮 = 0..22 再回 0（不跳帧 / 不重复）"
-      f"  [覆盖 {len(set(_chg))}/{_nfr} 帧]",
-      (_chg == list(range(_nfr)) + [0]
-       and all((b - a) % _nfr == 1 for a, b in zip(_chg, _chg[1:]))), True)
-#   ★ 一轮重画次数 = 帧数 + 1（帧号变了才画），10fps 的图不该按 30fps 重画。
-check(f"㉴-17 ★ 一轮里只重画 {_nfr + 1} 次（= 帧数+1，而不是 33ms 一次共 ~70 次）",
-      (len(_chg), _nfr + 1), (_nfr + 1, _nfr + 1))
+#   ★ 单帧时长 < 采样间隔时，"漏掉某几帧"是**采样**造成的物理必然，不是 bug ——
+#     所以"每帧都到"这条只在帧长 ≥ 33ms 时才要求（当前素材 80ms，满足）。
+_FR_MS = _ms[1] - _ms[0]
+_all = _FR_MS >= _TICK
+check(f"㉴-16 ★★ {_TICK}ms 采样跑满一轮：帧号严格 +1 递增、回到 0，不回头不重复"
+      f"  [覆盖 {len(set(_chg))}/{_nfr} 帧 · 每帧 {_FR_MS}ms]",
+      (_chg[0] == 0 and _chg[-1] == 0
+       and all((b - a) % _nfr == 1 for a, b in zip(_chg, _chg[1:]))
+       and (not _all or len(set(_chg)) == _nfr)), True)
+#   ★ 一轮重画次数 = 帧数 + 1（帧号变了才画），图 12.5fps 就不该按 30fps 重画。
+check(f"㉴-17 ★ 一轮里只重画 {len(_chg)} 次（≈ 帧数+1），而不是每 {_TICK}ms 一次"
+      f"共 {len(_seq)} 次",
+      ((len(_chg) == _nfr + 1 if _all else len(_chg) <= _nfr + 1)
+       and len(_chg) < len(_seq) / 2), True)
 
 
 # ㉴-18 ★ 展开态（横条）的**图标位**也换成同一张小人 —— 逐像素证一遍。
 #   为什么必须证：这条链上"球心"和"图标位"是**两处调用**，
 #   只改一处的后果是"悬停展开时球上的小人变回剪字"（一次形变里换脸）。
-_pl_none = _ur.render(238, 48, 14, scale=1.0, kind="idle", glyph="剪",
+_pl_none = _ur.render(238, _BD, 16, scale=1.0, kind="idle", glyph="剪",
                       title="一键导出", sub="预合成 · 存草稿", ball_a=0.0,
                       pill_a=1.0, avatar=None)
-_pl_av = _ur.render(238, 48, 14, scale=1.0, kind="idle", glyph="剪",
+_pl_av = _ur.render(238, _BD, 16, scale=1.0, kind="idle", glyph="剪",
                     title="一键导出", sub="预合成 · 存草稿", ball_a=0.0,
                     pill_a=1.0, avatar=0)
 _pn, _pa = _pl_none.load(), _pl_av.load()
 _i0 = _ur.pad_for(1.0) + _ur.default_layout(1.0)["pad"]
-_idia = _ur.default_layout(1.0)["icon_d"]
-_icx = _i0 + _idia / 2.0
-_icy = _ur.pad_for(1.0) + 48 / 2.0
+_icx = _i0 + _ICON / 2.0
+_icy = _ur.pad_for(1.0) + _BD / 2.0
 _inside = _outside = 0
 for _y in range(_pl_av.size[1]):
     for _x in range(_pl_av.size[0]):
         _dd = max(abs(_pn[_x, _y][_i] - _pa[_x, _y][_i]) for _i in range(4))
         if _dd <= 2:
             continue
-        if math.hypot(_x - _icx, _y - _icy) <= _idia / 2.0 + 2:
+        if math.hypot(_x - _icx, _y - _icy) <= _ICON / 2.0 + 2:
             _inside += 1
         else:
             _outside += 1
-check(f"㉴-18 ★ 展开态图标位也换成小人（差异必须**全部**落在那个 28px 圆盘里）"
+check(f"㉴-18 ★ 展开态图标位也换成小人（差异必须**全部**落在那个 {_ICON}px 圆盘里）"
       f"  [盘内 {_inside} 个 / 盘外 {_outside} 个]",
-      (_inside > 60 and _outside == 0), True)
+      (_inside > 40 and _outside == 0), True)
+
+# ㉴-19 ★★ 「球再稍微大点」落地（这一批的第二个要求）。
+#   ★ 为什么不直接断言"==56"：56 是**决定**不是**约束**。真正要守住的是三件事——
+#     球确实变大了、**环跟着球一起走**（不然球一变环就贴到边上）、
+#     球心里那个画面仍然填得满（球变大而画面不跟 = 白变大）。
+check(f"㉴-19 ★★ 球径 {_BD}px（第二十五批是 48）· 环心比例 {_RING_R / _HALF:.2f}（0.71 是原设计）"
+      f"· 待机画面占球 {_D_IDLE / _BD:.0%}",
+      (_BD >= 52 and 0.68 <= _RING_R / _HALF <= 0.74 and _D_IDLE / _BD >= 0.80), True)
+check("㉴-20 ★ 布局的两个数（环离球边 / 图标位直径）在渲染层和主程序里**逐项一致**"
+      "（两边各写一份，改了主程序那份不生效 —— 这个坑本项目踩过两次）",
+      (_ur.default_layout(1.0)["ring_inset"], _ur.default_layout(1.0)["icon_d"],
+       _ur.default_sizes(1.0)["ball"], _ur.default_sizes(1.0)["pct"]),
+      (gui.ui_metrics(1.0)["ring_inset"], gui.ui_metrics(1.0)["icon_d"],
+       gui.ui_metrics(1.0)["ball_px"], gui.ui_metrics(1.0)["pct_px"]))
+
+# ㉴-21 ★★ 头像的门控必须是"球**或**横条任一可见"。
+#   行为那一条在 `test_gui_smoke` 的 ⑫（真悬停到完全展开再读 `avatar`）；
+#   这里再钉一次源码，是因为这个 bug 的形态很隐蔽：**渲染层全对、只有门控错了**，
+#   而"展开后变回数字"这件事在静态截图/单看球态时完全看不出来。
+_vs = code_of(gui.Companion._view_state)
+_av_gate = _vs.split('"avatar"')[-1][:160] if '"avatar"' in _vs else ""
+check("㉴-21 ★★ `_view_state` 的 avatar 门控含 `pill_a`（只看 ball_a 会让"
+      "「展开后图标位变回数字」—— 第二十六批实测踩到）",
+      ("ball_a > 0.004" in _av_gate and "pill_a > 0.004" in _av_gate), True)
 
 
 print()

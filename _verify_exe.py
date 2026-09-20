@@ -459,6 +459,18 @@ def main():
                  "is_working", "_avatar_frame", "_tick_avatar",
                  "_working", "_work_t0", "_avatar_idx"]
         gmiss = [n for n in gmust if n not in gnames]
+        #   ★★ 第二十六批：**值**核验（不是名字）—— 这一批的可见改动就是"球变大"，
+        #     而 `BASE_H` 这个名字从第一版起就没变过，光看名字永远核不出来。
+        #     做法见 `剪映伴侣.py` 里那段注释：把原来的元组赋值拆成三行，
+        #     否则 `module_consts` 的 "LOAD_CONST 紧跟 STORE_NAME" 根本配不上。
+        gmc = module_consts(gco)
+        gvals = {"BASE_H": 56, "BASE_R": 16, "BASE_W": 238}
+        gbad = []
+        for k, want in gvals.items():
+            got = gmc.get(k, "<缺>")
+            print(f"   剪映伴侣.{k} = {got!r}  (期望 {want!r})")
+            if got != want:
+                gbad.append(k)
         # 文案常量核验：菜单标签 / 空闲提醒必须真在 exe 里。
         # ★ 第十四批：原来这里**另写了一份**只递归 code object 的收集器（和
         #   `all_consts` 重复且更弱）→ 统一走 all_consts，免得两份实现慢慢跑偏。
@@ -504,7 +516,8 @@ def main():
         txt_miss += [f"{t}(需精确常量)" for t in need_txt_exact if t not in gconsts]
         print("GUI 必需名字缺失:", gmiss if gmiss else "无")
         print("GUI 必需文案缺失:", txt_miss if txt_miss else "无")
-        gui_ok = (not gmiss) and (not txt_miss)
+        print("GUI 基准尺寸取值不对:", gbad if gbad else "无")
+        gui_ok = (not gmiss) and (not txt_miss) and (not gbad)
 
     # ---- ★★ 第二十四批（v1.5.0 质感返工）：**渲染层单独核验** ----
     #   为什么必须单独一段：这一批的改动**几乎全在 `ui_render.py`**（新模块）里，
@@ -525,14 +538,24 @@ def main():
                  # ★★ 第二十五批：球心动图（懒加载 / 时间轴 / 直径 / 贴图）
                  "avatar_frames", "avatar_count", "avatar_index_at",
                  "avatar_d", "draw_avatar", "_fit_square", "res_dir",
-                 "AVATAR_FILE", "AVATAR_INSET"]
+                 "AVATAR_FILE", "AVATAR_INSET",
+                 # ★★ 第二十六批：线稿那条路（判据 / 掩码 / 读取口）
+                 #   少一个的后果都是静默的：判据没了 → 线稿被当照片贴成黑圆；
+                 #   `avatar_kind` 没了 → 探针/测试没法查"这张素材走的哪条路"。
+                 "classify_avatar", "_to_ink_mask", "avatar_kind",
+                 "AVATAR_INK", "AVATAR_PHOTO", "AVATAR_INK_RGB"]
         umiss = [n for n in umust if n not in ur_names]
         mc = module_consts(ur_co)
         #   ★ 值核验（不是名字）：这一批修的就是这几个数，被改回旧值就等于没修。
         #     三条判据和 `test_guard` 的 ㉳-11/13/14 完全同源。
         uvals = {"SURF_TOP": (68, 68, 79), "SURF_BOT": (36, 36, 43),
                  "CARD_TOP": (76, 76, 86), "CARD_BOT": (44, 44, 52),
-                 "GROOVE": (0, 0, 0, 88)}
+                 "GROOVE": (0, 0, 0, 88),
+                 # ★★ 第二十六批：线稿那条路的三个数（判据阈值 / 线色 / 增益）。
+                 #   被改回旧值就等于"这张线稿又被当照片贴成黑圆"，而屏幕上
+                 #   只是"球心里黑了一块"，不报任何错。
+                 "AVATAR_INK_BLACK": 0.85, "AVATAR_INK_LIT": 0.10,
+                 "AVATAR_INK_GAIN": 1.7, "AVATAR_INK_RGB": (238, 240, 247)}
         bad = []
         for k, want in uvals.items():
             got = mc.get(k, "<缺>")
