@@ -46,7 +46,14 @@ test_keys_edit.py
 test_open_draft.py
 _result_*.png
 shots/
+shots_acc/
 run_result*.log
+_tmp_*.json
+_ui_diff.txt
+
+# 第二十二批补：上一轮排查"导出精度"留下的一次性脚本（同 _probe_* 的待遇）
+_acc_*.py
+_acc_*.txt
 
 # ============================================================
 # 保留（不要往上面加）

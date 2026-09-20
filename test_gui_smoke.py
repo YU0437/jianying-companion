@@ -97,8 +97,9 @@ try:
     check("★ 悬停展开后，常驻副标题「预合成 · 存草稿 · 清空原内容 · 你手动拖入」完整可见（不被裁）",
           c._fs.measure(c._sub) <= c.W - max(20, int(round(36 * c._scale)))
           - max(8, int(round(10 * c._scale))), c._fs.measure(c._sub))
-    check("画布元素齐备（球套件 + 横条套件两套都要在）",
-          all(getattr(c, k, None) for k in ("bg_item", "dot_item", "txt_item", "sub_item",
+    check("画布元素齐备（球套件 + 胶囊套件两套都要在）",
+          all(getattr(c, k, None) for k in ("bg_item", "icon_bg_item", "icon_item",
+                                            "txt_item", "sub_item",
                                             "ring_item", "arc_item", "ball_item",
                                             "bar_track", "bar_fill")))
     c._hover = False
@@ -439,8 +440,11 @@ try:
         return (c.cv.itemcget(c.bar_track, "state"), c.cv.itemcget(c.bar_fill, "state"))
 
     def _fill_w():
-        x0, _y0, x1, _y1 = c.cv.coords(c.bar_fill)
-        return int(x1 - x0)
+        # ★ 第二十一批：进度条从 `create_rectangle` 换成了**胶囊**（round_rect
+        #   → create_polygon，4*(seg+1)=100 个坐标点），所以不能再按"4 个数"
+        #   解包。取所有 x 的 min/max 当包围盒宽度，语义和旧写法一致。
+        xs = c.cv.coords(c.bar_fill)[0::2]
+        return int(max(xs) - min(xs))
 
     print("[9] 进度条（展开态）")
     c._pct = None
@@ -494,9 +498,9 @@ try:
     check("④ 进度弧长度 = 40%（extent = -360*0.4）",
           abs(float(c.cv.itemcget(c.arc_item, "extent")) + 144.0) < 1.0,
           c.cv.itemcget(c.arc_item, "extent"))
-    check("⑤ 球态下横条套件（文字/进度条）全隐藏 —— 这才叫不挡事",
+    check("⑤ 球态下胶囊套件（图标位/文字/进度条）全隐藏 —— 这才叫不挡事",
           all(c.cv.itemcget(i, "state") == "hidden"
-              for i in (c.txt_item, c.sub_item, c.dot_item,
+              for i in (c.txt_item, c.sub_item, c.icon_bg_item, c.icon_item,
                         c.bar_track, c.bar_fill)))
     c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 90%", hold=0, pct=90, step=4)
     settle()
@@ -541,6 +545,152 @@ try:
           "status_cb=st_render" in _rp, True)
     check("GUI 会把「第 N/共几步 · %」拼进副标题",
           "PIPELINE_TOTAL_STEPS" in inspect.getsource(c._pump), True)
+
+    # ============================================================ 第二十二批
+    # ★★ 提醒（别再踩）：本文件的 `check(name, cond, extra)` 是**布尔式**——
+    #    第二个参数是条件本身，不是"实际值"；要比值就自己写 `==`。
+    #    （test_guard 里的才是等值式 `check(name, got, want)`，两个签名不一样！）
+    print()
+    print("[9c] ★ 第二十二批（用户\"继续优化：把 ui 设计好一点\"）：胶囊宽度 / 图标位 / 卡片")
+
+    # ㉠ 度量单一出口：`_fit_width` 与 `_build_ui` 必须用同一套 tx / pad_r
+    _m22 = gui.ui_metrics(c._scale)
+    check("㉠ `_fit_width` 与 `_build_ui` 用同一套度量（tx / pad_r 完全一致）",
+          (_m22["tx"], _m22["pad_r"]) == (c._tx, c._pad_r), (c._tx, c._pad_r))
+
+    # ㉡ ★★ 根因回归：错误文案**整句**要放得下，不许被省略号吃掉尾巴
+    #    实测旧行为：「草稿备份没做成，导出后无法自动还原」→「…导出后无法自动…」
+    _err22 = "草稿备份没做成，导出后无法自动还原"
+    c._booted = False
+    c.set_state("err", _err22, "右键「打开草稿备份文件夹」", hold=0)
+    _avail22 = max(0, c._pill_w - c._tx - c._pad_r)
+    check("㉡ ★ 错误文案整句放得下（「…无法自动还原」不再被截断）",
+          gui.ellipsize(c._f, _err22, _avail22) == _err22,
+          gui.ellipsize(c._f, _err22, _avail22))
+    check("㉢ 胶囊宽度确实按新度量涨够了（≥ 文案 + 图标位 + 右侧留白）",
+          _avail22 >= c._f.measure(_err22), (_avail22, c._f.measure(_err22)))
+
+    # ㉣ 幂等：源码里大量文案自带「…」结尾，不许变成「… …」
+    check("㉣ 已经带省略号的文案不会被再补一个（幂等）",
+          gui.ellipsize(c._f, "批量处理中…", 1000) == "批量处理中…",
+          gui.ellipsize(c._f, "批量处理中…", 1000))
+    _long22 = "正在启动剪映，起来后点我「一键导出」"
+    _cut22 = gui.ellipsize(c._f, _long22 + "…", 120)
+    check("㉤ 真需要截断时，结果里只有一个省略号（不是「… …」）",
+          _cut22.count("…") == 1, _cut22)
+    check("㉥ 截断后不会以「… …」收尾（旧版那撮\"乱码方块\"）",
+          _cut22.rstrip().endswith("…") and "… …" not in _cut22, _cut22)
+
+    # ㉥b ★★ 中文折行禁则：标点不许被挤到行首单独成行
+    #    （那个"屏幕正中间孤零零一个句号"就是它；居中排版下活像个乱码点）
+    #    ★ 宽度故意卡在**正文刚好占满**的位置：不加禁则时末尾的「。」会被顶到下一行
+    _body22 = "草稿会先备份，导出完可以一键还原"
+    _lines22 = gui.wrap_lines(c._fs, _body22 + "。", c._fs.measure(_body22))
+    check("㉥b ★ 句号被悬挂在上一行（不会单独成行 → 屏幕上不再有孤立小点）",
+          len(_lines22) == 1 and _lines22[0].endswith("。"), _lines22)
+    check("㉥c 任何情况下标点都不落在行首",
+          all(not ln or ln[0] not in gui.NO_LINE_START
+              for ln in gui.wrap_lines(c._fs, "（真删）→ 打开产物文件夹。", 60)),
+          gui.wrap_lines(c._fs, "（真删）→ 打开产物文件夹。", 60))
+    check("㉥d 左括号不落在行尾",
+          all(not ln or ln[-1] not in gui.NO_LINE_END
+              for ln in gui.wrap_lines(c._fs, "打开（回到预合成前）", c._fs.measure("打开（"))),
+          gui.wrap_lines(c._fs, "打开（回到预合成前）", c._fs.measure("打开（")))
+
+    # ㉦ busy 的图标位必须有内容（旧版是空串 → 一个"看起来坏掉的色块"）
+    check("㉦ busy 的图标位 = 进度数字（与球里那个数字同源）",
+          gui.pill_glyph("busy", 58) == "58", gui.pill_glyph("busy", 58))
+    check("㉧ 拿不到百分比时也不许是空串",
+          gui.pill_glyph("busy") == "…", gui.pill_glyph("busy"))
+    check("㉨ 其它状态的图标字符没被带坏",
+          (gui.pill_glyph("idle"), gui.pill_glyph("ok"), gui.pill_glyph("err"))
+          == ("剪", "✓", "!"),
+          (gui.pill_glyph("idle"), gui.pill_glyph("ok"), gui.pill_glyph("err")))
+    c._hover = True
+    c.set_state("busy", "等剪映渲染出产物", "第 4/7 步 · 42%", hold=0, pct=42, step=4)
+    settle()
+    check("㉩ 展开态图标位真的画上了「42」",
+          c.cv.itemcget(c.icon_item, "text") == "42",
+          c.cv.itemcget(c.icon_item, "text"))
+
+    # ㉪ 通知卡正文折行（旧版单行 64 高，会把"要用户做的事"砍掉）
+    c._hover = False
+    c.set_state("idle", "一键导出", c._idle_sub(), hold=0)
+    settle()
+    c.notify("导出完成了", "左键点球 → 还原草稿（回到预合成前），产物文件一个字节不碰",
+             kind="ask", hold=0)
+    _c22 = c._card
+    check("㉪ 通知卡建出来了", _c22 is not None, _c22 is not None)
+    if _c22 is not None:
+        check("㉫ ★ 长正文折行 → 卡片跟着变高（不再是死值 64）", _c22.h > 64, _c22.h)
+        _body22 = [i for i in _c22.cv.find_all() if _c22.cv.type(i) == "text"
+                   and "\n" in str(_c22.cv.itemcget(i, "text"))]
+        check("㉬ 正文是**多行文本项**（交给 tk 排版，别自己猜行距）",
+              len(_body22) == 1, len(_body22))
+        _alltxt22 = " ".join(str(_c22.cv.itemcget(i, "text"))
+                             for i in _c22.cv.find_all()
+                             if _c22.cv.type(i) == "text")
+        check("㉭ ★ 被砍掉的半句「产物文件一个字节不碰」真的显示出来了",
+              "一个字节不碰" in _alltxt22, _alltxt22)
+        c._drop_card()
+        check("㉮ 通知与确认共用一张卡（同一时刻只有一张）", c._card is None, c._card)
+
+    # ㉯ 确认卡的按钮：坐标路由可用 + 文字颜色永远显式（不许被 fill="" 洗成默认色）
+    _seen22 = []
+    _hits22 = []
+
+    def _auto22():
+        card = c._card
+        if not card:
+            return
+        _y = card.h - 20
+        for _ev, _kw in (("<Motion>", dict(x=160, y=_y)),
+                         ("<Leave>", dict(x=160, y=_y)),
+                         ("<Motion>", dict(x=213, y=_y))):
+            try:
+                card.cv.event_generate(_ev, **_kw)
+                card.cv.update_idletasks()
+            except Exception:
+                pass
+            _seen22.append([str(card.cv.itemcget(i, "fill"))
+                            for i in card.cv.find_all()
+                            if card.cv.type(i) == "text"])
+        _hits22.append(True)
+        try:
+            card.cv.event_generate("<Button-1>", x=213, y=_y)   # 点「开始」
+        except Exception:
+            pass
+
+    c.root.after(250, _auto22)
+    # ★ 兜底：万一合成事件没送达，1.5s 后自己收窗，绝不让测试挂死
+    c.root.after(1500, lambda: getattr(c, "_card", None) and c._card.destroy())
+    # ★★ 再兜一层：`ask_confirm` 建不出卡片时会**退回系统模态框 ask_yes**（这是
+    #    刻意设计的安全网），而无头测试里没人去点它 —— 会**永久挂住**。
+    #    所以把 ask_yes 替掉：真走到回退路径就立刻当作"取消"，并记下调用点。
+    _keep_yes22 = gui.ask_yes
+    _fellback22 = []
+
+    def _stub_yes22(*a, **k):
+        import traceback as _tb
+        _f = _tb.extract_stack()
+        _fellback22.append(f"{_f[-2].filename.split(chr(92))[-1]}:{_f[-2].lineno} "
+                           f"{(_f[-2].line or '').strip()[:60]}")
+        return False
+
+    gui.ask_yes = _stub_yes22
+    try:
+        _ans22 = c.ask_confirm("开始导出？", "全选 → 复合片段 → 预合成。\n\n草稿会先备份。",
+                               ok_label="开始", no_label="取消", kind="ask")
+    finally:
+        gui.ask_yes = _keep_yes22
+    check("㉯ ★ 自绘确认卡真的建出来了（没有回退到系统模态框）",
+          not _fellback22, _fellback22)
+    check("㉰ 点「开始」返回 True（坐标路由可用，整块按钮区都是热区）",
+          (_ans22, _hits22) == (True, [True]), (_ans22, _hits22))
+    _flat22 = [f for row in _seen22 for f in row]
+    check("㉱ ★ 悬停/移开过程中，按钮文字颜色**从没**被洗成空串（不再是黑字）",
+          bool(_flat22) and all(f != "" for f in _flat22), _flat22)
+    check("㉲ 确认卡用完即收（不留孤儿顶层窗）", c._card is None, c._card)
 
     # ============================================================ 第十四批
     print()

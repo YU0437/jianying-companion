@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![红线](https://img.shields.io/badge/%E4%B8%8D%E7%A2%B0%E8%A7%86%E9%A2%91%E6%96%87%E4%BB%B6-%E4%B8%80%E5%AD%97%E8%8A%82%E4%B8%8D%E5%8A%A8-critical)
 
-![界面预览：悬浮球的四种状态](docs/ui-preview.png)
+![界面预览：悬浮球的五种状态](docs/ui-preview.png)
 
 ---
 

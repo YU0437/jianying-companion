@@ -2477,6 +2477,62 @@ check("㉪ 走通 → 自动还原（闭环）",
 check("㉫ 失败/中止 → 退回手动且等待态保留（绝不把用户逼进死角）",
       'elif item[0] == "full_auto_fail"' in _gsrc30, True)
 
+# ================================================================ [31]
+print()
+print("[31] ★ 第二十二批（用户\"继续优化：把 ui 设计好一点\"）：界面回归的四个硬约束")
+
+# ---- ㉠ 度量单一出口：`_fit_width` 必须和 `_build_ui` 同一套数 ----
+#   事故：第二十一批把布局从"文字从 36px 起 / 右边留 10"改成"28px 图标位 +
+#   文字从图标右侧起 / 右边留 12"（多占 13px），但 `_fit_width` 还留着旧数 ——
+#   于是胶囊宽度永远比文案少 13px，关键信息被省略号吃掉
+#   （实测「…导出后无法自动**还原**」只剩「…无法自动…」）。
+_fit_src31 = _inspect.getsource(gui.Companion._fit_width)
+_check_src31 = _inspect.getsource(gui.Companion._build_ui)
+check("㉠ `_fit_width` 的 tx/pad_r 取自 ui_metrics（唯一出口）",
+      ("ui_metrics(s)" in _fit_src31, "ui_metrics(s)" in _check_src31), (True, True))
+check("㉡ `_fit_width` 里再也没有旧布局的硬编码度量（36*s / 10*s）",
+      ("36 * s" in _fit_src31 or "max(8, int(round(10 * s)))" in _fit_src31), False)
+check("㉢ ui_metrics 是模块里**唯一**定义 tx 的地方（别人只能读）",
+      _gsrc30.count("def ui_metrics("), 1)
+
+# ---- ㉣ 确认卡按钮：底色高亮与文字颜色必须**分开**，且不许用空 fill 复原 ----
+#   事故：矩形与文字共用 tag "ok"，`<Leave>` 时 `itemconfigure("ok", fill="")`
+#   把文字也重置成 tk 的默认色（深色卡上变黑/看不见），光标在矩形与文字之间
+#   移动还会互触发 Leave→Enter 反复闪。
+_ask_src31 = _inspect.getsource(gui.Companion.ask_confirm)
+check("㉣ 按钮底色高亮走独立 tag（ok_bg / no_bg），不再和文字共用一个 tag",
+      ('tags=("ok_bg",)' in _ask_src31 and 'tags=("no_bg",)' in _ask_src31), True)
+check("㉤ 再也没有 `itemconfigure(\"ok\", fill=...)` 这种会连文字一起改的写法",
+      ('itemconfigure("ok", fill=' in _ask_src31
+       or 'tag_bind("ok"' in _ask_src31), False)
+check("㉥ 按钮高亮用四角可分别设置的圆角（免得戳出卡片圆角外）",
+      "round_pts_corners(" in _ask_src31, True)
+check("㉦ 悬停/点击按坐标判定（整块按钮区都是热区）",
+      ('cv.bind("<Motion>"' in _ask_src31 and 'cv.bind("<Button-1>"' in _ask_src31), True)
+
+# ---- ㉧ busy 态的图标位不许是空的（那是个"看起来坏掉的色块"） ----
+check("㉧ `pill_glyph` 里 busy 不再返回空串",
+      '"busy": ""' in _gsrc30, False)
+check("㉨ busy 的图标位显示进度数字（与球里的数字同源）",
+      ("def pill_glyph(kind, pct=None)" in _gsrc30
+       and "pill_glyph(self.state[0], self._pct)" in _gsrc30), True)
+
+# ---- ㉩ 卡片销毁必须先 withdraw（防御性：这个窗口组合有残影风险） ----
+_pd_src31 = _inspect.getsource(gui.Popup.destroy)
+check("㉩ 卡片销毁先 withdraw 再 destroy（无边框+色键顶层窗的防御性收窗）",
+      ("self.top.withdraw()" in _pd_src31 and "self.top.destroy()" in _pd_src31), True)
+check("㉪ 目标卡片销毁也走这个出口（不许绕过）",
+      "self._card = None\n        if c is not None" in _inspect.getsource(
+          gui.Companion._drop_card), True)
+
+# ---- ㉫ 通知卡正文折行（不许单行砍掉"要用户做的事"）+ 中文禁则 ----
+check("㉫ 通知卡正文折行 + 行数上限",
+      ("wrap_lines(f_m, msg, avail)" in _gsrc30
+       and "CARD_BODY_MAXLINES" in _gsrc30), True)
+check("㉬ wrap_lines 有禁则表（标点不许落在行首）",
+      ("NO_LINE_START" in _inspect.getsource(gui.wrap_lines)
+       and "NO_LINE_END" in _inspect.getsource(gui.wrap_lines)), True)
+
 print()
 print("失败项:", fails if fails else "无")
 sys.exit(1 if fails else 0)

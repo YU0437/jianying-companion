@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![Video files untouched](https://img.shields.io/badge/video_files-byte_untouched-critical)
 
-![UI preview: four states of the floating ball](docs/ui-preview.png)
+![UI preview: five states of the floating ball](docs/ui-preview.png)
 
 ---
 

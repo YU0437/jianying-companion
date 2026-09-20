@@ -10,6 +10,7 @@
 - [Code layout](#code-layout)
 - [Tests](#tests)
 - [Full release pipeline](#full-release-pipeline)
+- [How to regenerate the UI preview](#how-to-regenerate-the-ui-preview-docsui-previewpng)
 - [Pitfalls we actually hit](#pitfalls-we-actually-hit)
 - [Hard rules when changing this code](#hard-rules-when-changing-this-code)
 
@@ -127,6 +128,52 @@ deserialises the code objects of the main script and `jy_core`, then asserts:
 
 Then check: the config contains only the whitelisted keys, the path values are right, and the result
 file was deleted. Then uninstall: the user config is **kept**, the log/result files are cleaned up.
+
+## How to regenerate the UI preview (`docs/ui-preview.png`)
+
+The image at the top of the README must be **rendered from the real app**, never hand-assembled —
+a hand-made image keeps showing the old colours after a redesign, and a doc that lies is worse than
+no doc at all. The local script `_probe_readme.py` (deliberately not committed, same as the release
+scripts) renders five states and tiles them into one image:
+
+idle ball / working ball (progress arc + number) / expanded hover capsule / error capsule / notification card
+
+### Three things you must know
+
+**① The window is colour-key transparent, so a screen grab captures your wallpaper**
+
+Pixels outside the ball/capsule are genuinely transparent, but a screen grab cannot capture
+"transparent" — on screen those pixels *are* the desktop wallpaper. Do **not** try to "punch out"
+the shape with a `round_pts()` polygon: the rect from `GetWindowRect()` differs from the real canvas
+content by **1–4 pixels**, so the mask cuts outside the true shape and leaves a ring of wallpaper in
+the corners (it looks like a grey arc). Also do **not** use `PrintWindow` — for these layered windows
+it always returns pure black.
+
+**② The fix: swap the colour key for a colour the UI never uses**
+
+```python
+FAKE_KEY = "#ff00fe"          # there is no pink in the UI; magenta is the real key
+w.attributes("-transparentcolor", FAKE_KEY)   # the magenta window background becomes visible
+img = ImageGrab.grab(...)                     # the further from magenta, the more opaque
+w.attributes("-transparentcolor", UI_KEY)     # restore afterwards
+```
+
+That single grab is **both the shape source and the colour source** (inside the window the backdrop
+is magenta anyway, so it does not affect the colours). Finally keep only what falls inside each
+window rect, and the ring of wallpaper outside the union is gone.
+
+> ★★ `attributes("-transparentcolor", "")` **raises nothing and changes nothing** — there is no way
+> to "just turn the colour key off", so do not waste time on it.
+> Lesson: **"it did not raise" ≠ "it took effect"**.
+
+**③ You must kill the periodic timers before grabbing**
+
+`_follow_fast` calls `_poll_hover()` every 33 ms and derives `_hover` from the **real cursor
+position** — so the "hover-expanded" state you set up by hand collapses back to the ball a moment
+before the grab (the captured capsule shows only the ball on the left). The probe replaces
+`_follow` / `_follow_fast` / `_watch` / `_pump` with no-ops on the instance, then waits long enough
+for the callbacks **already queued via `after`** to run once and re-register themselves as those
+no-ops, which breaks the chain.
 
 ## Pitfalls we actually hit
 
